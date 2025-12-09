@@ -173,8 +173,11 @@ app.post("/set-openai-key", (req, res) => {
 // STATUS
 // ----------------------------------------------
 app.get("/status", (req, res) => {
-  res.json(CONFIG);
+  const safeConfig = { ...CONFIG };
+  safeConfig.autopollHandle = CONFIG.autopollHandle ? "RUNNING" : "STOPPED";
+  res.json(safeConfig);
 });
+
 
 // ----------------------------------------------
 // Render Port Binding
