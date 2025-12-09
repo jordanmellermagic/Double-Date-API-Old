@@ -4,35 +4,35 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
+// Store config in memory
 let CONFIG = {
-  docUrl: null,
-  openAIKey: null,
+  gooKey: null,
+  gooUserId: null,  // ex: 158
+  last_value: null,
   formatted_date: null,
-  days_lived: null,
-  last_raw_text: null,
+  days_lived: null
 };
 
-// ----------------------------------------
+// -----------------------------
 // Helpers
-// ----------------------------------------
+// -----------------------------
 
+// Compute days lived
 function calculateDaysLived(dateString) {
-  try {
-    const date = new Date(dateString);
-    const today = new Date();
-    const diff = today - date;
-    return Math.floor(diff / (1000 * 60 * 60 * 24));
-  } catch (err) {
-    return null;
-  }
+  const d = new Date(dateString);
+  const now = new Date();
+  return Math.floor((now - d) / (1000 * 60 * 60 * 24));
 }
 
-async function fetchGoogleDoc(url) {
+// Hit GOO endpoint
+async function fetchFromGoo(userId, apiKey) {
+  const url = `https://11q.co/api/last/${userId}?key=${apiKey}`;
   const res = await axios.get(url);
-  return res.data;
+  return res.data;  // GOO returns JSON
 }
 
-async function getFormattedDateFromOpenAI(text, apiKey) {
+// Ask OpenAI to extract a formatted YYYY-MM-DD date
+async function askOpenAI(rawText, openAIKey) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -40,58 +40,71 @@ async function getFormattedDateFromOpenAI(text, apiKey) {
       messages: [
         {
           role: "system",
-          content:
-            "Extract a birthdate from text and return ONLY in YYYY-MM-DD format.",
+          content: "Extract a birthdate from this text and respond ONLY in YYYY-MM-DD format."
         },
-        { role: "user", content: text },
-      ],
+        {
+          role: "user",
+          content: rawText
+        }
+      ]
     },
     {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${openAIKey}` }
     }
   );
 
   return res.data.choices[0].message.content.trim();
 }
 
-
-// ----------------------------------------
-// CORE ENDPOINT: Trigger Polling
-// ----------------------------------------
+// -----------------------------
+// MAIN ACTION: trigger polling
+// -----------------------------
 app.post("/trigger", async (req, res) => {
   try {
-    if (!CONFIG.docUrl) return res.status(400).json({ error: "No doc URL set." });
-    if (!CONFIG.openAIKey) return res.status(400).json({ error: "No OpenAI key set." });
+    const { gooUserId, gooKey, openAIKey } = CONFIG;
 
-    // 1) Pull Google Doc text
-    const text = await fetchGoogleDoc(CONFIG.docUrl);
-    CONFIG.last_raw_text = text;
+    if (!gooUserId || !gooKey) {
+      return res.status(400).json({ error: "Set gooUserId and gooKey first." });
+    }
+    if (!openAIKey) {
+      return res.status(400).json({ error: "Set OpenAI key first." });
+    }
 
-    // 2) Get formatted date from OpenAI
-    const formatted = await getFormattedDateFromOpenAI(text, CONFIG.openAIKey);
+    // 1. Fetch from GOO
+    const gooData = await fetchFromGoo(gooUserId, gooKey);
+    CONFIG.last_value = gooData;
+
+    // 2. Send gooData.text to OpenAI
+    const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
     CONFIG.formatted_date = formatted;
 
-    // 3) Calculate days lived
+    // 3. Compute days lived
     CONFIG.days_lived = calculateDaysLived(formatted);
 
-    return res.json({
+    res.json({
       success: true,
-      formatted_date: CONFIG.formatted_date,
-      days_lived: CONFIG.days_lived,
+      goo_value: gooData,
+      formatted_date: formatted,
+      days_lived: CONFIG.days_lived
     });
+
   } catch (err) {
-    console.log(err);
+    console.error(err);
     res.status(500).json({ error: err.toString() });
   }
 });
 
-// ----------------------------------------
-// Setters
-// ----------------------------------------
+// -----------------------------
+// Configuration endpoints
+// -----------------------------
+app.post("/set-goo-key", (req, res) => {
+  CONFIG.gooKey = req.body.key;
+  res.json({ success: true });
+});
 
-app.post("/set-doc-url", (req, res) => {
-  CONFIG.docUrl = req.body.docUrl;
-  res.json({ success: true, docUrl: CONFIG.docUrl });
+app.post("/set-goo-user", (req, res) => {
+  CONFIG.gooUserId = req.body.userId;
+  res.json({ success: true });
 });
 
 app.post("/set-openai-key", (req, res) => {
@@ -99,24 +112,17 @@ app.post("/set-openai-key", (req, res) => {
   res.json({ success: true });
 });
 
-// ----------------------------------------
+// -----------------------------
 // Status
-// ----------------------------------------
-
+// -----------------------------
 app.get("/status", (req, res) => {
-  res.json({
-    formatted_date: CONFIG.formatted_date,
-    days_lived: CONFIG.days_lived,
-    docUrl: CONFIG.docUrl,
-    openAIKeySet: CONFIG.openAIKey != null,
-    last_raw_text_snippet: CONFIG.last_raw_text
-      ? CONFIG.last_raw_text.substring(0, 200)
-      : null,
-  });
+  res.json(CONFIG);
 });
 
-// ----------------------------------------
-
+// -----------------------------
+// Render Port Fix
+// -----------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`API running on port ${PORT}`));
-
+app.listen(PORT, () => {
+  console.log(`API running on port ${PORT}`);
+});
