@@ -282,6 +282,19 @@ app.get('/api/users/:userId', (req, res) => {
   res.json(publicUser(user));
 });
 
+// Lightweight endpoint JUST for Hydra: returns { daysLived: number | null }
+app.get('/api/users/:userId/days-lived', (req, res) => {
+  const { userId } = req.params;
+  const user = users.get(userId);
+
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const value = user.daysLived ?? null;
+  res.json({ daysLived: value });
+});
+
 // Update user config (goo / OpenAI / interval)
 app.patch('/api/users/:userId', (req, res) => {
   const { userId } = req.params;
