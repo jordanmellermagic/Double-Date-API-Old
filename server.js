@@ -280,33 +280,36 @@ app.get('/api/users/:userId', (req, res) => {
   res.json(publicUser(user));
 });
 
-// 🔒 Ultra-safe endpoint JUST for Hydra: always JSON, always a number, never errors
+// Ultra-safe Hydra endpoint: ALWAYS returns a STRING and NEVER errors
 app.get('/api/users/:userId/days-lived', (req, res) => {
   try {
     const { userId } = req.params;
     const user = users.get(userId);
 
-    let value = 0;
+    let numericValue = 0;
 
     if (!user) {
       console.warn(`Hydra requested days-lived for missing user ${userId}`);
     } else if (typeof user.daysLived === 'number' && Number.isFinite(user.daysLived)) {
-      value = user.daysLived;
-    } else {
-      // Not yet computed, default 0
-      value = 0;
+      numericValue = user.daysLived;
     }
 
-    // Explicitly force JSON, no HTML, no extra data
+    // Convert number → STRING (Hydra is happier with strings)
+    const stringValue = String(numericValue);
+
+    // Guaranteed small, valid JSON string
     res.set('Content-Type', 'application/json');
-    res.status(200).send(JSON.stringify({ daysLived: value }));
+    return res.status(200).send(JSON.stringify({ daysLived: stringValue }));
+
   } catch (err) {
-    console.error('Error in Hydra endpoint:', err);
-    // Even on error, still return valid JSON & 200
+    console.error('Hydra endpoint error:', err);
+
+    // On ANY error, still return valid JSON with string value "0"
     res.set('Content-Type', 'application/json');
-    res.status(200).send(JSON.stringify({ daysLived: 0 }));
+    return res.status(200).send(JSON.stringify({ daysLived: "0" }));
   }
 });
+
 
 // Update user config (goo / OpenAI / interval)
 app.patch('/api/users/:userId', (req, res) => {
