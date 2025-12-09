@@ -283,17 +283,27 @@ app.get('/api/users/:userId', (req, res) => {
 });
 
 // Lightweight endpoint JUST for Hydra: returns { daysLived: number | null }
+// Ultra-safe endpoint JUST for Hydra: always returns a number & never errors
 app.get('/api/users/:userId/days-lived', (req, res) => {
   const { userId } = req.params;
   const user = users.get(userId);
 
+  // If user doesn't exist or any issue happens, ALWAYS return 200 + numeric value
   if (!user) {
-    return res.status(404).json({ error: 'User not found' });
+    console.warn(`Hydra requested days-lived for missing user ${userId}`);
+    return res.status(200).json({ daysLived: 0 });
   }
 
-  const value = user.daysLived ?? null;
-  res.json({ daysLived: value });
+  // Hydra cannot handle null or undefined — guarantee a number
+  const value =
+    typeof user.daysLived === 'number'
+      ? user.daysLived
+      : 0;
+
+  // Send tiny JSON only
+  return res.status(200).json({ daysLived: value });
 });
+
 
 // Update user config (goo / OpenAI / interval)
 app.patch('/api/users/:userId', (req, res) => {
