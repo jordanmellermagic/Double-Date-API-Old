@@ -17,7 +17,7 @@ if (typeof global.fetch === 'function') {
   fetchFn = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 }
 
-// In-memory user store. In production you'd use a database.
+// In-memory user store.
 /**
  * User object shape:
  * {
@@ -97,7 +97,6 @@ Text: "${queryText}"`;
 
     content = content.trim();
 
-    // Perfect compliance case
     if (content.toLowerCase() === 'null') {
       return null;
     }
@@ -179,7 +178,6 @@ async function pollUser(user) {
 // Helper: start polling for a user
 function startPollingForUser(user) {
   if (user.polling && user.timerId) {
-    // Already polling
     return;
   }
   const interval = user.pollIntervalMs || 5000;
@@ -282,28 +280,33 @@ app.get('/api/users/:userId', (req, res) => {
   res.json(publicUser(user));
 });
 
-// Lightweight endpoint JUST for Hydra: returns { daysLived: number | null }
-// Ultra-safe endpoint JUST for Hydra: always returns a number & never errors
+// 🔒 Ultra-safe endpoint JUST for Hydra: always JSON, always a number, never errors
 app.get('/api/users/:userId/days-lived', (req, res) => {
-  const { userId } = req.params;
-  const user = users.get(userId);
+  try {
+    const { userId } = req.params;
+    const user = users.get(userId);
 
-  // If user doesn't exist or any issue happens, ALWAYS return 200 + numeric value
-  if (!user) {
-    console.warn(`Hydra requested days-lived for missing user ${userId}`);
-    return res.status(200).json({ daysLived: 0 });
+    let value = 0;
+
+    if (!user) {
+      console.warn(`Hydra requested days-lived for missing user ${userId}`);
+    } else if (typeof user.daysLived === 'number' && Number.isFinite(user.daysLived)) {
+      value = user.daysLived;
+    } else {
+      // Not yet computed, default 0
+      value = 0;
+    }
+
+    // Explicitly force JSON, no HTML, no extra data
+    res.set('Content-Type', 'application/json');
+    res.status(200).send(JSON.stringify({ daysLived: value }));
+  } catch (err) {
+    console.error('Error in Hydra endpoint:', err);
+    // Even on error, still return valid JSON & 200
+    res.set('Content-Type', 'application/json');
+    res.status(200).send(JSON.stringify({ daysLived: 0 }));
   }
-
-  // Hydra cannot handle null or undefined — guarantee a number
-  const value =
-    typeof user.daysLived === 'number'
-      ? user.daysLived
-      : 0;
-
-  // Send tiny JSON only
-  return res.status(200).json({ daysLived: value });
 });
-
 
 // Update user config (goo / OpenAI / interval)
 app.patch('/api/users/:userId', (req, res) => {
@@ -327,7 +330,6 @@ app.patch('/api/users/:userId', (req, res) => {
   if (typeof pollIntervalMs === 'number' && pollIntervalMs > 0) {
     user.pollIntervalMs = pollIntervalMs;
 
-    // If currently polling, restart with new interval
     if (user.polling) {
       stopPollingForUser(user);
       startPollingForUser(user);
@@ -374,6 +376,13 @@ app.post('/api/users/:userId/refresh', async (req, res) => {
     console.error('Manual refresh error:', err);
     res.status(500).json({ error: 'Error during manual refresh' });
   }
+});
+
+// Global error handler – always JSON (never HTML)
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.set('Content-Type', 'application/json');
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {
