@@ -1,0 +1,307 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Double Date API Admin</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 1.5rem;
+      background: #0b0b0f;
+      color: #f5f5f5;
+    }
+    h1, h2 {
+      margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-size: 1.8rem;
+    }
+    h2 {
+      font-size: 1.4rem;
+      margin-top: 1.5rem;
+    }
+    .card {
+      background: #15151f;
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.04);
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+      color: #ccc;
+    }
+    input {
+      width: 100%;
+      padding: 0.35rem 0.5rem;
+      border-radius: 6px;
+      border: 1px solid #34344a;
+      margin-top: 0.2rem;
+      background: #11111a;
+      color: #f5f5f5;
+      font-size: 0.9rem;
+    }
+    input::placeholder {
+      color: #666;
+    }
+    button {
+      margin-top: 0.75rem;
+      padding: 0.4rem 0.8rem;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.9rem;
+      background: #4f46e5;
+      color: white;
+    }
+    button.secondary {
+      background: #27272f;
+      color: #f5f5f5;
+      margin-left: 0.25rem;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .col {
+      flex: 1 1 280px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+    }
+    th, td {
+      padding: 0.4rem 0.5rem;
+      border-bottom: 1px solid #262636;
+    }
+    th {
+      text-align: left;
+      color: #aaa;
+      font-weight: 500;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    .pill {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .pill.on {
+      background: rgba(34, 197, 94, 0.15);
+      color: #4ade80;
+    }
+    .pill.off {
+      background: rgba(148, 163, 184, 0.2);
+      color: #e5e7eb;
+    }
+    code {
+      font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.8rem;
+      background: #11111a;
+      padding: 0.15rem 0.3rem;
+      border-radius: 4px;
+    }
+    #status {
+      font-size: 0.8rem;
+      color: #a1a1ff;
+      margin-top: 0.25rem;
+      min-height: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Double Date API – Admin</h1>
+  <p style="font-size:0.9rem;color:#d4d4d8;">
+    Create users, link Goo IDs & OpenAI keys, and control polling.<br />
+    API base is this same server, e.g. <code>/api/users</code> and <code>/api/users/:userId</code>.
+  </p>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <h2>Create User</h2>
+        <p style="font-size:0.8rem;color:#a1a1aa;margin-bottom:0.5rem;">
+          You only need a unique <code>userId</code>, a Goo user id (or full URL), and an OpenAI API key.
+        </p>
+        <label>
+          User ID
+          <input id="new-user-id" placeholder="e.g. 1" />
+        </label>
+        <label>
+          Goo User ID
+          <input id="new-goo-user-id" placeholder="e.g. 158 (will build https://11q.co/api/last/158)" />
+        </label>
+        <label>
+          OR Full Goo URL
+          <input id="new-goo-url" placeholder="https://11q.co/api/last/158" />
+        </label>
+        <label>
+          OpenAI API Key
+          <input id="new-openai-key" type="password" placeholder="sk-..." />
+        </label>
+        <label>
+          Poll Interval (ms)
+          <input id="new-poll-interval" type="number" placeholder="5000" />
+        </label>
+        <button id="create-user-btn">Create User</button>
+        <div id="status"></div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <h2>Users & Polling</h2>
+        <div id="users-container">
+          <p style="font-size:0.85rem;color:#9ca3af;">No users yet. Create one on the left.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function fetchJSON(url, options = {}) {
+      const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options
+      });
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {
+        data = text;
+      }
+      if (!res.ok) {
+        throw new Error(data && data.error ? data.error : 'Request failed');
+      }
+      return data;
+    }
+
+    async function loadUsers() {
+      const container = document.getElementById('users-container');
+      try {
+        const users = await fetchJSON('/api/users');
+        if (!users.length) {
+          container.innerHTML = '<p style="font-size:0.85rem;color:#9ca3af;">No users yet. Create one on the left.</p>';
+          return;
+        }
+
+        let html = '<table><thead><tr><th>User</th><th>Polling</th><th>Days Lived</th><th>Last Query</th><th>Actions</th></tr></thead><tbody>';
+        for (const u of users) {
+          const pollPill = u.polling
+            ? '<span class="pill on">ON</span>'
+            : '<span class="pill off">OFF</span>';
+          html += `
+            <tr>
+              <td><code>${u.userId}</code></td>
+              <td>${pollPill}</td>
+              <td>${u.daysLived ?? '—'}</td>
+              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${u.lastQuery || ''}">
+                ${u.lastQuery ? u.lastQuery : '<span style="color:#6b7280;">(none yet)</span>'}
+              </td>
+              <td>
+                <button class="secondary" onclick="togglePolling('${u.userId}', ${!u.polling})">${u.polling ? 'Stop' : 'Start'}</button>
+                <button class="secondary" onclick="refreshUser('${u.userId}')">Refresh</button>
+                <a class="secondary" style="margin-left:4px;font-size:0.8rem;color:#a5b4fc;text-decoration:none;" href="/api/users/${u.userId}" target="_blank">JSON</a>
+              </td>
+            </tr>
+          `;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<p style="color:#f97373;font-size:0.85rem;">Error loading users: ${err.message}</p>`;
+      }
+    }
+
+    async function togglePolling(userId, enabled) {
+      try {
+        await fetchJSON(`/api/users/${encodeURIComponent(userId)}/polling`, {
+          method: 'POST',
+          body: JSON.stringify({ enabled })
+        });
+        await loadUsers();
+      } catch (err) {
+        alert('Error toggling polling: ' + err.message);
+      }
+    }
+
+    async function refreshUser(userId) {
+      try {
+        await fetchJSON(`/api/users/${encodeURIComponent(userId)}/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        await loadUsers();
+      } catch (err) {
+        alert('Error refreshing user: ' + err.message);
+      }
+    }
+
+    document.getElementById('create-user-btn').addEventListener('click', async () => {
+      const userId = document.getElementById('new-user-id').value.trim();
+      const gooUserId = document.getElementById('new-goo-user-id').value.trim();
+      const gooUrl = document.getElementById('new-goo-url').value.trim();
+      const openaiKey = document.getElementById('new-openai-key').value.trim();
+      const intervalStr = document.getElementById('new-poll-interval').value.trim();
+
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = '';
+
+      if (!userId) {
+        statusEl.textContent = 'User ID is required.';
+        return;
+      }
+      if (!openaiKey) {
+        statusEl.textContent = 'OpenAI API key is required.';
+        return;
+      }
+      if (!gooUserId && !gooUrl) {
+        statusEl.textContent = 'Either Goo user ID or full Goo URL is required.';
+        return;
+      }
+
+      const pollIntervalMs = intervalStr ? Number(intervalStr) : undefined;
+
+      try {
+        await fetchJSON('/api/users', {
+          method: 'POST',
+          body: JSON.stringify({
+            userId,
+            gooUserId: gooUserId || undefined,
+            gooUrl: gooUrl || undefined,
+            openaiApiKey: openaiKey,
+            pollIntervalMs
+          })
+        });
+        statusEl.textContent = 'User created.';
+        document.getElementById('new-user-id').value = '';
+        document.getElementById('new-goo-user-id').value = '';
+        document.getElementById('new-goo-url').value = '';
+        document.getElementById('new-openai-key').value = '';
+        document.getElementById('new-poll-interval').value = '';
+        await loadUsers();
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    });
+
+    loadUsers();
+    setInterval(loadUsers, 5000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "double-date-api",
+  "version": "1.0.0",
+  "description": "Multi-user days-lived API that polls Goo and uses OpenAI to extract dates.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.1",
+    "node-fetch": "^3.3.2"
+  }
+}
