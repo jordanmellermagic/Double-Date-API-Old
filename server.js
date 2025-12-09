@@ -4,13 +4,15 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// Store config in memory
+// Store configuration and last-known values
 let CONFIG = {
   gooKey: null,
   gooUserId: null,
   openAIKey: null,
 
   last_value: null,
+  last_hash: null,
+
   formatted_date: null,
   days_lived: null,
 
@@ -35,6 +37,11 @@ async function fetchFromGoo(userId, apiKey) {
   return res.data;
 }
 
+// Hash function to detect change in GOO data
+function simpleHash(obj) {
+  return JSON.stringify(obj);
+}
+
 async function askOpenAI(rawText, key) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
@@ -43,56 +50,67 @@ async function askOpenAI(rawText, key) {
       messages: [
         {
           role: "system",
-          content: "Extract a birthdate from this text and respond ONLY in YYYY-MM-DD format."
+          content:
+            "Extract a birthdate from this text and respond ONLY in YYYY-MM-DD format."
         },
         { role: "user", content: rawText }
       ]
     },
-    {
-      headers: { Authorization: `Bearer ${key}` }
-    }
+    { headers: { Authorization: `Bearer ${key}` } }
   );
 
   return res.data.choices[0].message.content.trim();
 }
 
 // ----------------------------------------------
-// CORE: One processing cycle
+// CORE CHANGE DETECTION POLLING CYCLE
 // ----------------------------------------------
-async function runProcessingCycle() {
+async function runPollingCycle() {
   try {
     const { gooUserId, gooKey, openAIKey } = CONFIG;
+
     if (!gooUserId || !gooKey || !openAIKey) {
-      console.log("Skipping cycle — missing configuration.");
+      console.log("Polling skipped — missing configuration.");
       return;
     }
 
     // 1. Fetch from GOO
     const gooData = await fetchFromGoo(gooUserId, gooKey);
-    CONFIG.last_value = gooData;
+    const newHash = simpleHash(gooData);
 
-    // 2. Use OpenAI to extract date
-    const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
-    CONFIG.formatted_date = formatted;
+    // 2. Compare with last hash
+    if (newHash !== CONFIG.last_hash) {
+      console.log("🔄 GOO data changed — processing...");
 
-    // 3. Compute days lived
-    CONFIG.days_lived = calculateDaysLived(formatted);
+      CONFIG.last_hash = newHash;
+      CONFIG.last_value = gooData;
 
-    console.log("Updated:", {
-      formatted_date: formatted,
-      days_lived: CONFIG.days_lived
-    });
+      // 3. Ask OpenAI for formatted date
+      const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
+      CONFIG.formatted_date = formatted;
+
+      // 4. Compute days lived
+      CONFIG.days_lived = calculateDaysLived(formatted);
+
+      console.log("✅ Updated:", {
+        formatted_date: formatted,
+        days_lived: CONFIG.days_lived
+      });
+
+    } else {
+      console.log("⏭️ No change detected — skipping OpenAI.");
+    }
 
   } catch (err) {
-    console.error("Cycle error:", err.toString());
+    console.error("Polling cycle error:", err.toString());
   }
 }
 
 // ----------------------------------------------
-// Manual trigger (single cycle)
+// Manual trigger (runs one cycle)
 // ----------------------------------------------
 app.post("/trigger", async (req, res) => {
-  await runProcessingCycle();
+  await runPollingCycle();
   res.json({
     formatted_date: CONFIG.formatted_date,
     days_lived: CONFIG.days_lived
@@ -100,7 +118,7 @@ app.post("/trigger", async (req, res) => {
 });
 
 // ----------------------------------------------
-// Autopoll controls
+// AUTOPOLL CONTROL
 // ----------------------------------------------
 app.post("/start-autopoll", (req, res) => {
   const interval = req.body.intervalMs || 5000;
@@ -109,8 +127,7 @@ app.post("/start-autopoll", (req, res) => {
   if (CONFIG.autopollHandle) clearInterval(CONFIG.autopollHandle);
 
   CONFIG.autopoll = true;
-
-  CONFIG.autopollHandle = setInterval(runProcessingCycle, interval);
+  CONFIG.autopollHandle = setInterval(runPollingCycle, interval);
 
   res.json({
     success: true,
@@ -135,7 +152,7 @@ app.get("/autopoll-status", (req, res) => {
 });
 
 // ----------------------------------------------
-// Configuration endpoints
+// CONFIGURATION ENDPOINTS
 // ----------------------------------------------
 app.post("/set-goo-key", (req, res) => {
   CONFIG.gooKey = req.body.key;
@@ -153,7 +170,7 @@ app.post("/set-openai-key", (req, res) => {
 });
 
 // ----------------------------------------------
-// Status endpoint
+// STATUS
 // ----------------------------------------------
 app.get("/status", (req, res) => {
   res.json(CONFIG);
