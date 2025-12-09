@@ -26,9 +26,13 @@ let CONFIG = {
 // -----------------------------
 
 function calculateDaysLived(dateString) {
-  const d = new Date(dateString);
-  const now = new Date();
-  return Math.floor((now - d) / (1000 * 60 * 60 * 24));
+  try {
+    const d = new Date(dateString);
+    const now = new Date();
+    return Math.floor((now - d) / (1000 * 60 * 60 * 24));
+  } catch {
+    return null;
+  }
 }
 
 async function fetchFromGoo(userId, apiKey) {
@@ -37,11 +41,13 @@ async function fetchFromGoo(userId, apiKey) {
   return res.data;
 }
 
-// Hash function to detect change in GOO data
 function simpleHash(obj) {
   return JSON.stringify(obj);
 }
 
+// -------------------------------------------------------------------------
+// UPDATED OpenAI CALL — Extract ANY date from text, or return NONE
+// -------------------------------------------------------------------------
 async function askOpenAI(rawText, key) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
@@ -51,7 +57,7 @@ async function askOpenAI(rawText, key) {
         {
           role: "system",
           content:
-            "Extract a birthdate from this text and respond ONLY in YYYY-MM-DD format."
+            "Extract ANY date found in the text below and output it ONLY in YYYY-MM-DD format. If no date exists, return the string NONE."
         },
         { role: "user", content: rawText }
       ]
@@ -62,9 +68,9 @@ async function askOpenAI(rawText, key) {
   return res.data.choices[0].message.content.trim();
 }
 
-// ----------------------------------------------
-// CORE CHANGE DETECTION POLLING CYCLE
-// ----------------------------------------------
+// -------------------------------------------------------------------------
+// CORE CHANGE-DETECTION POLLING LOOP
+// -------------------------------------------------------------------------
 async function runPollingCycle() {
   try {
     const { gooUserId, gooKey, openAIKey } = CONFIG;
@@ -74,29 +80,35 @@ async function runPollingCycle() {
       return;
     }
 
-    // 1. Fetch from GOO
+    // Get latest GOO value
     const gooData = await fetchFromGoo(gooUserId, gooKey);
     const newHash = simpleHash(gooData);
 
-    // 2. Compare with last hash
+    // Check for change
     if (newHash !== CONFIG.last_hash) {
-      console.log("🔄 GOO data changed — processing...");
+      console.log("🔄 GOO data changed — processing…");
 
       CONFIG.last_hash = newHash;
       CONFIG.last_value = gooData;
 
-      // 3. Ask OpenAI for formatted date
+      // Send to OpenAI
       const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
-      CONFIG.formatted_date = formatted;
+      console.log("AI Returned:", formatted);
 
-      // 4. Compute days lived
+      if (formatted === "NONE") {
+        console.log("⚠️ No date found in message — skipping update.");
+        CONFIG.formatted_date = null;
+        CONFIG.days_lived = null;
+        return;
+      }
+
+      CONFIG.formatted_date = formatted;
       CONFIG.days_lived = calculateDaysLived(formatted);
 
       console.log("✅ Updated:", {
-        formatted_date: formatted,
+        formatted_date: CONFIG.formatted_date,
         days_lived: CONFIG.days_lived
       });
-
     } else {
       console.log("⏭️ No change detected — skipping OpenAI.");
     }
@@ -107,7 +119,7 @@ async function runPollingCycle() {
 }
 
 // ----------------------------------------------
-// Manual trigger (runs one cycle)
+// Manual single-cycle trigger
 // ----------------------------------------------
 app.post("/trigger", async (req, res) => {
   await runPollingCycle();
@@ -144,13 +156,6 @@ app.post("/stop-autopoll", (req, res) => {
   res.json({ success: true, message: "Autopolling stopped" });
 });
 
-app.get("/autopoll-status", (req, res) => {
-  res.json({
-    autopolling: CONFIG.autopoll,
-    intervalMs: CONFIG.intervalMs
-  });
-});
-
 // ----------------------------------------------
 // CONFIGURATION ENDPOINTS
 // ----------------------------------------------
@@ -170,14 +175,13 @@ app.post("/set-openai-key", (req, res) => {
 });
 
 // ----------------------------------------------
-// STATUS
+// SAFE STATUS ENDPOINT — avoids sending the timer object
 // ----------------------------------------------
 app.get("/status", (req, res) => {
   const safeConfig = { ...CONFIG };
   safeConfig.autopollHandle = CONFIG.autopollHandle ? "RUNNING" : "STOPPED";
   res.json(safeConfig);
 });
-
 
 // ----------------------------------------------
 // Render Port Binding
