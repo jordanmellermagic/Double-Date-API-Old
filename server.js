@@ -45,9 +45,7 @@ function simpleHash(obj) {
   return JSON.stringify(obj);
 }
 
-// -------------------------------------------------------------------------
-// UPDATED OpenAI CALL — Extract ANY date from text, or return NONE
-// -------------------------------------------------------------------------
+// FIXED: Extract ANY date from text
 async function askOpenAI(rawText, key) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
@@ -68,9 +66,9 @@ async function askOpenAI(rawText, key) {
   return res.data.choices[0].message.content.trim();
 }
 
-// -------------------------------------------------------------------------
-// CORE CHANGE-DETECTION POLLING LOOP
-// -------------------------------------------------------------------------
+// ----------------------------------------------
+// AUTO-POLL LOOP
+// ----------------------------------------------
 async function runPollingCycle() {
   try {
     const { gooUserId, gooKey, openAIKey } = CONFIG;
@@ -80,23 +78,19 @@ async function runPollingCycle() {
       return;
     }
 
-    // Get latest GOO value
     const gooData = await fetchFromGoo(gooUserId, gooKey);
     const newHash = simpleHash(gooData);
 
-    // Check for change
     if (newHash !== CONFIG.last_hash) {
       console.log("🔄 GOO data changed — processing…");
 
       CONFIG.last_hash = newHash;
       CONFIG.last_value = gooData;
 
-      // Send to OpenAI
       const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
-      console.log("AI Returned:", formatted);
 
       if (formatted === "NONE") {
-        console.log("⚠️ No date found in message — skipping update.");
+        console.log("⚠️ No date found — skipping update.");
         CONFIG.formatted_date = null;
         CONFIG.days_lived = null;
         return;
@@ -109,6 +103,7 @@ async function runPollingCycle() {
         formatted_date: CONFIG.formatted_date,
         days_lived: CONFIG.days_lived
       });
+
     } else {
       console.log("⏭️ No change detected — skipping OpenAI.");
     }
@@ -119,7 +114,7 @@ async function runPollingCycle() {
 }
 
 // ----------------------------------------------
-// Manual single-cycle trigger
+// Manual trigger
 // ----------------------------------------------
 app.post("/trigger", async (req, res) => {
   await runPollingCycle();
@@ -157,7 +152,35 @@ app.post("/stop-autopoll", (req, res) => {
 });
 
 // ----------------------------------------------
-// CONFIGURATION ENDPOINTS
+// EASY FIX: Auto-extract gooUserId & gooKey from a URL
+// ----------------------------------------------
+app.post("/set-goo-url", (req, res) => {
+  const { url } = req.body;
+
+  try {
+    const u = new URL(url);
+
+    const id = u.pathname.split("/").pop();
+    const key = u.searchParams.get("key");
+
+    if (!id || !key) return res.status(400).json({ error: "Invalid GOO URL." });
+
+    CONFIG.gooUserId = id;
+    CONFIG.gooKey = key;
+
+    res.json({
+      success: true,
+      gooUserId: id,
+      gooKey: key
+    });
+
+  } catch {
+    res.status(400).json({ error: "Invalid URL format" });
+  }
+});
+
+// ----------------------------------------------
+// Manual key + user endpoints still available
 // ----------------------------------------------
 app.post("/set-goo-key", (req, res) => {
   CONFIG.gooKey = req.body.key;
@@ -175,12 +198,13 @@ app.post("/set-openai-key", (req, res) => {
 });
 
 // ----------------------------------------------
-// SAFE STATUS ENDPOINT — avoids sending the timer object
+// SAFE STATUS
 // ----------------------------------------------
 app.get("/status", (req, res) => {
-  const safeConfig = { ...CONFIG };
-  safeConfig.autopollHandle = CONFIG.autopollHandle ? "RUNNING" : "STOPPED";
-  res.json(safeConfig);
+  res.json({
+    ...CONFIG,
+    autopollHandle: CONFIG.autopollHandle ? "RUNNING" : "STOPPED"
+  });
 });
 
 // ----------------------------------------------
