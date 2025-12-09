@@ -4,15 +4,15 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// Store configuration and last-known values
+// ------------------------------------------------------------------
+// CONFIG STORAGE (only two real things you need to set)
+// ------------------------------------------------------------------
 let CONFIG = {
-  gooKey: null,
-  gooUserId: null,
-  openAIKey: null,
+  gooUrl: null,        // Example: "https://11q.co/api/158"
+  openAIKey: null,     // Your OpenAI API key
 
-  last_value: null,
+  last_query: null,
   last_hash: null,
-
   formatted_date: null,
   days_lived: null,
 
@@ -21,32 +21,27 @@ let CONFIG = {
   autopollHandle: null
 };
 
-// -----------------------------
-// Helpers
-// -----------------------------
-
+// ------------------------------------------------------------------
+// HELPERS
+// ------------------------------------------------------------------
 function calculateDaysLived(dateString) {
-  try {
-    const d = new Date(dateString);
-    const now = new Date();
-    return Math.floor((now - d) / (1000 * 60 * 60 * 24));
-  } catch {
-    return null;
-  }
+  const d = new Date(dateString);
+  if (isNaN(d.getTime())) return null;
+
+  const now = new Date();
+  return Math.floor((now - d) / (1000 * 60 * 60 * 24));
 }
 
-async function fetchFromGoo(userId, apiKey) {
-  const url = `https://11q.co/api/last/${userId}?key=${apiKey}`;
+function simpleHash(text) {
+  return JSON.stringify(text);
+}
+
+async function fetchFromGoo(url) {
   const res = await axios.get(url);
   return res.data;
 }
 
-function simpleHash(obj) {
-  return JSON.stringify(obj);
-}
-
-// FIXED: Extract ANY date from text
-async function askOpenAI(rawText, key) {
+async function askOpenAI(text, key) {
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -55,160 +50,138 @@ async function askOpenAI(rawText, key) {
         {
           role: "system",
           content:
-            "Extract ANY date found in the text below and output it ONLY in YYYY-MM-DD format. If no date exists, return the string NONE."
+            "Extract ANY date found in the text below and output ONLY YYYY-MM-DD. If no date exists, return NONE."
         },
-        { role: "user", content: rawText }
+        { role: "user", content: text }
       ]
     },
-    { headers: { Authorization: `Bearer ${key}` } }
+    {
+      headers: {
+        Authorization: `Bearer ${key}`
+      }
+    }
   );
 
   return res.data.choices[0].message.content.trim();
 }
 
-// ----------------------------------------------
-// AUTO-POLL LOOP
-// ----------------------------------------------
-async function runPollingCycle() {
+// ------------------------------------------------------------------
+// MAIN PROCESSING CYCLE
+// ------------------------------------------------------------------
+async function runProcessingCycle() {
   try {
-    const { gooUserId, gooKey, openAIKey } = CONFIG;
-
-    if (!gooUserId || !gooKey || !openAIKey) {
-      console.log("Polling skipped — missing configuration.");
+    if (!CONFIG.gooUrl || !CONFIG.openAIKey) {
+      console.log("Skipping — missing gooUrl or OpenAI key.");
       return;
     }
 
-    const gooData = await fetchFromGoo(gooUserId, gooKey);
-    const newHash = simpleHash(gooData);
+    const gooData = await fetchFromGoo(CONFIG.gooUrl);
 
-    if (newHash !== CONFIG.last_hash) {
-      console.log("🔄 GOO data changed — processing…");
-
-      CONFIG.last_hash = newHash;
-      CONFIG.last_value = gooData;
-
-      const formatted = await askOpenAI(JSON.stringify(gooData), openAIKey);
-
-      if (formatted === "NONE") {
-        console.log("⚠️ No date found — skipping update.");
-        CONFIG.formatted_date = null;
-        CONFIG.days_lived = null;
-        return;
-      }
-
-      CONFIG.formatted_date = formatted;
-      CONFIG.days_lived = calculateDaysLived(formatted);
-
-      console.log("✅ Updated:", {
-        formatted_date: CONFIG.formatted_date,
-        days_lived: CONFIG.days_lived
-      });
-
-    } else {
-      console.log("⏭️ No change detected — skipping OpenAI.");
+    if (!gooData.query) {
+      console.log("No 'query' field found in GOO response.");
+      return;
     }
 
+    const queryText = gooData.query;
+    const newHash = simpleHash(queryText);
+
+    if (newHash === CONFIG.last_hash) {
+      console.log("No new query.");
+      return;
+    }
+
+    CONFIG.last_hash = newHash;
+    CONFIG.last_query = queryText;
+
+    console.log("🔄 New query:", queryText);
+
+    const formatted = await askOpenAI(queryText, CONFIG.openAIKey);
+
+    if (formatted === "NONE") {
+      CONFIG.formatted_date = null;
+      CONFIG.days_lived = null;
+      console.log("⚠️ No date found.");
+      return;
+    }
+
+    CONFIG.formatted_date = formatted;
+    CONFIG.days_lived = calculateDaysLived(formatted);
+
+    console.log("✅ Updated:", {
+      formatted_date: CONFIG.formatted_date,
+      days_lived: CONFIG.days_lived
+    });
+
   } catch (err) {
-    console.error("Polling cycle error:", err.toString());
+    console.error("Processing error:", err.toString());
   }
 }
 
-// ----------------------------------------------
-// Manual trigger
-// ----------------------------------------------
-app.post("/trigger", async (req, res) => {
-  await runPollingCycle();
-  res.json({
-    formatted_date: CONFIG.formatted_date,
-    days_lived: CONFIG.days_lived
-  });
-});
+// ------------------------------------------------------------------
+// ENDPOINTS YOU WILL USE
+// ------------------------------------------------------------------
 
-// ----------------------------------------------
-// AUTOPOLL CONTROL
-// ----------------------------------------------
-app.post("/start-autopoll", (req, res) => {
-  const interval = req.body.intervalMs || 5000;
-  CONFIG.intervalMs = interval;
-
-  if (CONFIG.autopollHandle) clearInterval(CONFIG.autopollHandle);
-
-  CONFIG.autopoll = true;
-  CONFIG.autopollHandle = setInterval(runPollingCycle, interval);
-
-  res.json({
-    success: true,
-    message: "Autopolling started",
-    intervalMs: interval
-  });
-});
-
-app.post("/stop-autopoll", (req, res) => {
-  CONFIG.autopoll = false;
-  if (CONFIG.autopollHandle) clearInterval(CONFIG.autopollHandle);
-  CONFIG.autopollHandle = null;
-
-  res.json({ success: true, message: "Autopolling stopped" });
-});
-
-// ----------------------------------------------
-// EASY FIX: Auto-extract gooUserId & gooKey from a URL
-// ----------------------------------------------
+// 1) Set the GOO URL (example: https://11q.co/api/158)
 app.post("/set-goo-url", (req, res) => {
-  const { url } = req.body;
-
-  try {
-    const u = new URL(url);
-
-    const id = u.pathname.split("/").pop();
-    const key = u.searchParams.get("key");
-
-    if (!id || !key) return res.status(400).json({ error: "Invalid GOO URL." });
-
-    CONFIG.gooUserId = id;
-    CONFIG.gooKey = key;
-
-    res.json({
-      success: true,
-      gooUserId: id,
-      gooKey: key
-    });
-
-  } catch {
-    res.status(400).json({ error: "Invalid URL format" });
-  }
+  CONFIG.gooUrl = req.body.url;
+  res.json({ success: true, gooUrl: CONFIG.gooUrl });
 });
 
-// ----------------------------------------------
-// Manual key + user endpoints still available
-// ----------------------------------------------
-app.post("/set-goo-key", (req, res) => {
-  CONFIG.gooKey = req.body.key;
-  res.json({ success: true });
-});
-
-app.post("/set-goo-user", (req, res) => {
-  CONFIG.gooUserId = req.body.userId;
-  res.json({ success: true });
-});
-
+// 2) Set OpenAI KEY
 app.post("/set-openai-key", (req, res) => {
   CONFIG.openAIKey = req.body.key;
   res.json({ success: true });
 });
 
-// ----------------------------------------------
-// SAFE STATUS
-// ----------------------------------------------
+// 3) Start autopoll
+app.post("/start-autopoll", (req, res) => {
+  CONFIG.intervalMs = req.body.intervalMs || 5000;
+
+  if (CONFIG.autopollHandle)
+    clearInterval(CONFIG.autopollHandle);
+
+  CONFIG.autopoll = true;
+  CONFIG.autopollHandle = setInterval(runProcessingCycle, CONFIG.intervalMs);
+
+  res.json({ success: true, intervalMs: CONFIG.intervalMs });
+});
+
+// 4) Stop autopoll
+app.post("/stop-autopoll", (req, res) => {
+  if (CONFIG.autopollHandle)
+    clearInterval(CONFIG.autopollHandle);
+
+  CONFIG.autopoll = false;
+  CONFIG.autopollHandle = null;
+
+  res.json({ success: true });
+});
+
+// 5) Manually trigger one cycle
+app.post("/trigger", async (req, res) => {
+  await runProcessingCycle();
+  res.json({
+    last_query: CONFIG.last_query,
+    formatted_date: CONFIG.formatted_date,
+    days_lived: CONFIG.days_lived
+  });
+});
+
+// 6) Status
 app.get("/status", (req, res) => {
   res.json({
-    ...CONFIG,
+    gooUrl: CONFIG.gooUrl,
+    last_query: CONFIG.last_query,
+    formatted_date: CONFIG.formatted_date,
+    days_lived: CONFIG.days_lived,
+    autopoll: CONFIG.autopoll,
+    intervalMs: CONFIG.intervalMs,
     autopollHandle: CONFIG.autopollHandle ? "RUNNING" : "STOPPED"
   });
 });
 
-// ----------------------------------------------
-// Render Port Binding
-// ----------------------------------------------
+// ------------------------------------------------------------------
+// SERVER BINDING
+// ------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
