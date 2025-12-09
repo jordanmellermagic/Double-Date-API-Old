@@ -1,4 +1,3 @@
-
 // server.js
 // Multi-user "days lived" API that polls Goo and uses OpenAI to extract dates.
 
@@ -93,21 +92,29 @@ Text: "${queryText}"`;
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content?.trim();
+    let content = data.choices?.[0]?.message?.content;
     if (!content) return null;
 
+    content = content.trim();
+
+    // Perfect compliance case
     if (content.toLowerCase() === 'null') {
       return null;
     }
 
-    // Very simple validation: YYYY-MM-DD
-    const match = content.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    // Strip code fences / backticks if present
+    content = content.replace(/```[\s\S]*?```/g, ' ');
+    content = content.replace(/`/g, ' ');
+
+    // Look for ANY yyyy-mm-dd pattern in the content
+    const match = content.match(/\d{4}-\d{2}-\d{2}/);
     if (!match) {
       console.warn(`OpenAI returned unexpected format for user ${user.userId}:`, content);
       return null;
     }
 
-    return content;
+    const formatted = match[0];
+    return formatted;
   } catch (err) {
     console.error(`Error calling OpenAI for user ${user.userId}:`, err);
     return null;
