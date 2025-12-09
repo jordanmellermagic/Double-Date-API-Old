@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -63,6 +62,9 @@
       color: #f5f5f5;
       margin-left: 0.25rem;
     }
+    button.danger {
+      background: #dc2626;
+    }
     button:disabled {
       opacity: 0.6;
       cursor: default;
@@ -84,6 +86,7 @@
     th, td {
       padding: 0.4rem 0.5rem;
       border-bottom: 1px solid #262636;
+      vertical-align: middle;
     }
     th {
       text-align: left;
@@ -100,13 +103,9 @@
       font-size: 0.75rem;
       font-weight: 500;
     }
-    .pill.on {
-      background: rgba(34, 197, 94, 0.15);
-      color: #4ade80;
-    }
-    .pill.off {
-      background: rgba(148, 163, 184, 0.2);
-      color: #e5e7eb;
+    .pill.locale {
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
     }
     code {
       font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -121,50 +120,78 @@
       margin-top: 0.25rem;
       min-height: 1rem;
     }
+    .locale-toggle {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.3rem;
+      font-size: 0.8rem;
+    }
+    .locale-toggle label {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      margin-top: 0;
+      cursor: pointer;
+    }
+    .small-note {
+      font-size: 0.75rem;
+      color: #9ca3af;
+      margin-top: 0.25rem;
+    }
   </style>
 </head>
 <body>
   <h1>Double Date API – Admin</h1>
   <p style="font-size:0.9rem;color:#d4d4d8;">
-    Create users, link Goo IDs & OpenAI keys, and control polling.<br />
-    API base is this same server, e.g. <code>/api/users</code> and <code>/api/users/:userId</code>.
+    Create, edit, and remove users for Double Date.<br />
+    Each user auto-polls every <code>2 seconds</code> and exposes <code>/api/users/:userId/days-lived</code> for Hydra.
   </p>
 
   <div class="row">
     <div class="col">
       <div class="card">
-        <h2>Create User</h2>
+        <h2 id="form-title">Create User</h2>
         <p style="font-size:0.8rem;color:#a1a1aa;margin-bottom:0.5rem;">
-          You only need a unique <code>userId</code>, a Goo user id (or full URL), and an OpenAI API key.
+          Required: user ID, Goo user ID, OpenAI API key, and date locale (U.S. or international).
         </p>
         <label>
           User ID
-          <input id="new-user-id" placeholder="e.g. 1" />
+          <input id="user-id" placeholder="e.g. 1" />
         </label>
         <label>
           Goo User ID
-          <input id="new-goo-user-id" placeholder="e.g. 158 (will build https://11q.co/api/last/158)" />
-        </label>
-        <label>
-          OR Full Goo URL
-          <input id="new-goo-url" placeholder="https://11q.co/api/last/158" />
+          <input id="goo-user-id" placeholder="e.g. 158 (builds https://11q.co/api/last/158)" />
         </label>
         <label>
           OpenAI API Key
-          <input id="new-openai-key" type="password" placeholder="sk-..." />
+          <input id="openai-key" type="password" placeholder="sk-..." />
         </label>
         <label>
-          Poll Interval (ms)
-          <input id="new-poll-interval" type="number" placeholder="5000" />
+          Date Locale
+          <div class="locale-toggle">
+            <label>
+              <input type="radio" name="date-locale" value="US" checked />
+              U.S. (MM/DD/YYYY)
+            </label>
+            <label>
+              <input type="radio" name="date-locale" value="INTL" />
+              INTL (DD/MM/YYYY)
+            </label>
+          </div>
+          <div class="small-note">
+            This affects how ambiguous dates like <code>11/3/2008</code> are interpreted.
+          </div>
         </label>
-        <button id="create-user-btn">Create User</button>
+
+        <button id="save-user-btn">Create User</button>
+        <button id="cancel-edit-btn" class="secondary" style="display:none;">Cancel Edit</button>
         <div id="status"></div>
       </div>
     </div>
 
     <div class="col">
       <div class="card">
-        <h2>Users & Polling</h2>
+        <h2>Users</h2>
         <div id="users-container">
           <p style="font-size:0.85rem;color:#9ca3af;">No users yet. Create one on the left.</p>
         </div>
@@ -173,6 +200,30 @@
   </div>
 
   <script>
+    let editingUserId = null;
+
+    function getSelectedLocale() {
+      const radios = document.querySelectorAll('input[name="date-locale"]');
+      for (const r of radios) {
+        if (r.checked) return r.value;
+      }
+      return 'US';
+    }
+
+    function setSelectedLocale(value) {
+      const radios = document.querySelectorAll('input[name="date-locale"]');
+      let found = false;
+      for (const r of radios) {
+        if (r.value === value) {
+          r.checked = true;
+          found = true;
+        }
+      }
+      if (!found) {
+        radios[0].checked = true;
+      }
+    }
+
     async function fetchJSON(url, options = {}) {
       const res = await fetch(url, {
         headers: { 'Content-Type': 'application/json' },
@@ -200,23 +251,21 @@
           return;
         }
 
-        let html = '<table><thead><tr><th>User</th><th>Polling</th><th>Days Lived</th><th>Last Query</th><th>Actions</th></tr></thead><tbody>';
+        let html = '<table><thead><tr><th>User</th><th>Locale</th><th>Days Lived</th><th>Last Query</th><th>Actions</th></tr></thead><tbody>';
         for (const u of users) {
-          const pollPill = u.polling
-            ? '<span class="pill on">ON</span>'
-            : '<span class="pill off">OFF</span>';
+          const localeLabel = u.dateLocale === 'INTL' ? 'INTL' : 'US';
           html += `
             <tr>
               <td><code>${u.userId}</code></td>
-              <td>${pollPill}</td>
+              <td><span class="pill locale">${localeLabel}</span></td>
               <td>${u.daysLived ?? '—'}</td>
               <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${u.lastQuery || ''}">
                 ${u.lastQuery ? u.lastQuery : '<span style="color:#6b7280;">(none yet)</span>'}
               </td>
               <td>
-                <button class="secondary" onclick="togglePolling('${u.userId}', ${!u.polling})">${u.polling ? 'Stop' : 'Start'}</button>
+                <button class="secondary" onclick="editUser('${u.userId}')">Edit</button>
                 <button class="secondary" onclick="refreshUser('${u.userId}')">Refresh</button>
-                <a class="secondary" style="margin-left:4px;font-size:0.8rem;color:#a5b4fc;text-decoration:none;" href="/api/users/${u.userId}" target="_blank">JSON</a>
+                <button class="secondary danger" onclick="deleteUser('${u.userId}')">Delete</button>
               </td>
             </tr>
           `;
@@ -228,15 +277,23 @@
       }
     }
 
-    async function togglePolling(userId, enabled) {
+    async function editUser(userId) {
       try {
-        await fetchJSON(`/api/users/${encodeURIComponent(userId)}/polling`, {
-          method: 'POST',
-          body: JSON.stringify({ enabled })
-        });
-        await loadUsers();
+        const user = await fetchJSON(`/api/users/${encodeURIComponent(userId)}`);
+
+        editingUserId = userId;
+        document.getElementById('form-title').textContent = `Edit User (${userId})`;
+        document.getElementById('user-id').value = user.userId;
+        document.getElementById('user-id').disabled = true;
+        document.getElementById('goo-user-id').value = user.gooUserId || '';
+        document.getElementById('openai-key').value = '';
+        setSelectedLocale(user.dateLocale || 'US');
+
+        document.getElementById('save-user-btn').textContent = 'Save Changes';
+        document.getElementById('cancel-edit-btn').style.display = 'inline-block';
+        document.getElementById('status').textContent = '';
       } catch (err) {
-        alert('Error toggling polling: ' + err.message);
+        alert('Error loading user: ' + err.message);
       }
     }
 
@@ -252,12 +309,43 @@
       }
     }
 
-    document.getElementById('create-user-btn').addEventListener('click', async () => {
-      const userId = document.getElementById('new-user-id').value.trim();
-      const gooUserId = document.getElementById('new-goo-user-id').value.trim();
-      const gooUrl = document.getElementById('new-goo-url').value.trim();
-      const openaiKey = document.getElementById('new-openai-key').value.trim();
-      const intervalStr = document.getElementById('new-poll-interval').value.trim();
+    async function deleteUser(userId) {
+      if (!confirm(`Delete user ${userId}? This cannot be undone.`)) return;
+      try {
+        await fetchJSON(`/api/users/${encodeURIComponent(userId)}`, {
+          method: 'DELETE'
+        });
+        if (editingUserId === userId) {
+          resetForm();
+        }
+        await loadUsers();
+      } catch (err) {
+        alert('Error deleting user: ' + err.message);
+      }
+    }
+
+    function resetForm() {
+      editingUserId = null;
+      document.getElementById('form-title').textContent = 'Create User';
+      document.getElementById('user-id').value = '';
+      document.getElementById('user-id').disabled = false;
+      document.getElementById('goo-user-id').value = '';
+      document.getElementById('openai-key').value = '';
+      setSelectedLocale('US');
+      document.getElementById('save-user-btn').textContent = 'Create User';
+      document.getElementById('cancel-edit-btn').style.display = 'none';
+      document.getElementById('status').textContent = '';
+    }
+
+    document.getElementById('cancel-edit-btn').addEventListener('click', () => {
+      resetForm();
+    });
+
+    document.getElementById('save-user-btn').addEventListener('click', async () => {
+      const userId = document.getElementById('user-id').value.trim();
+      const gooUserId = document.getElementById('goo-user-id').value.trim();
+      const openaiKey = document.getElementById('openai-key').value.trim();
+      const dateLocale = getSelectedLocale();
 
       const statusEl = document.getElementById('status');
       statusEl.textContent = '';
@@ -266,35 +354,47 @@
         statusEl.textContent = 'User ID is required.';
         return;
       }
-      if (!openaiKey) {
-        statusEl.textContent = 'OpenAI API key is required.';
+      if (!gooUserId) {
+        statusEl.textContent = 'Goo user ID is required.';
         return;
       }
-      if (!gooUserId && !gooUrl) {
-        statusEl.textContent = 'Either Goo user ID or full Goo URL is required.';
-        return;
-      }
-
-      const pollIntervalMs = intervalStr ? Number(intervalStr) : undefined;
 
       try {
-        await fetchJSON('/api/users', {
-          method: 'POST',
-          body: JSON.stringify({
-            userId,
-            gooUserId: gooUserId || undefined,
-            gooUrl: gooUrl || undefined,
-            openaiApiKey: openaiKey,
-            pollIntervalMs
-          })
-        });
-        statusEl.textContent = 'User created.';
-        document.getElementById('new-user-id').value = '';
-        document.getElementById('new-goo-user-id').value = '';
-        document.getElementById('new-goo-url').value = '';
-        document.getElementById('new-openai-key').value = '';
-        document.getElementById('new-poll-interval').value = '';
+        if (!editingUserId) {
+          // CREATE
+          if (!openaiKey) {
+            statusEl.textContent = 'OpenAI API key is required when creating a user.';
+            return;
+          }
+
+          await fetchJSON('/api/users', {
+            method: 'POST',
+            body: JSON.stringify({
+              userId,
+              gooUserId,
+              openaiApiKey: openaiKey,
+              dateLocale
+            })
+          });
+          statusEl.textContent = 'User created.';
+        } else {
+          // EDIT
+          const body = { gooUserId, dateLocale };
+          if (openaiKey) {
+            body.openaiApiKey = openaiKey;
+          }
+
+          await fetchJSON(`/api/users/${encodeURIComponent(editingUserId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(body)
+          });
+          statusEl.textContent = 'User updated.';
+        }
+
         await loadUsers();
+        if (!editingUserId) {
+          resetForm();
+        }
       } catch (err) {
         statusEl.textContent = 'Error: ' + err.message;
       }
