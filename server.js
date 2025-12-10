@@ -70,7 +70,7 @@ function buildGooURL(id) {
 // Calculate days lived from a YYYY-MM-DD date string
 function calculateDaysLived(dateStr) {
   if (!dateStr) return null;
-  const birth = new Date(dateStr + 'T00:00:00Z');
+  const birth = new Date(dateStr);
   if (isNaN(birth.getTime())) return null;
 
   const now = new Date();
