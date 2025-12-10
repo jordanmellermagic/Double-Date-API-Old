@@ -1,5 +1,5 @@
 // server.js
-// Multi-user "days lived" API that polls Goo and uses OpenAI to extract dates.
+// Double Date API - Final Clean Version
 
 const express = require('express');
 const path = require('path');
@@ -7,9 +7,13 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// IMPORTANT: set this in your environment on Render or locally
+// e.g. ADMIN_CODE=yourSecret123
+const ADMIN_CODE = process.env.ADMIN_CODE || null;
+
 app.use(express.json());
 
-// Use global fetch if available (Node 18+), otherwise fall back to node-fetch via dynamic import.
+// Use global fetch if available (Node 18+), otherwise fall back to node-fetch
 let fetchFn;
 if (typeof global.fetch === 'function') {
   fetchFn = global.fetch.bind(global);
@@ -17,36 +21,56 @@ if (typeof global.fetch === 'function') {
   fetchFn = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 }
 
-// In-memory user store.
-/**
- * User object shape:
- * {
- *   userId: string,
- *   gooUserId: string | null,
- *   gooUrl: string,
- *   openaiApiKey: string,
- *   pollIntervalMs: number,
- *   polling: boolean,
- *   timerId: NodeJS.Timeout | null,
- *   lastQuery: string | null,
- *   lastProcessedQuery: string | null,
- *   formattedDate: string | null,
- *   daysLived: number | null,
- *   lastUpdated: string | null,
- *   dateLocale: 'US' | 'INTL'
- * }
- */
+// ========== In-memory user store ==========
+//
+// One entry per Goo ID (id).
+//
+// Shape:
+// {
+//   id: string,          // same as Goo ID, and URL segment
+//   openaiKey: string,   // OpenAI API key for this user
+//   locale: 'US' | 'INTL',
+//
+//   pollIntervalMs: number,
+//   polling: boolean,
+//   timerId: NodeJS.Timeout | null,
+//
+//   query: string | null,      // last processed Goo query
+//   date: string | null,       // 'YYYY-MM-DD'
+//   daysLived: number | null,  // number of days since date
+//   weekday: string | null,    // 'Monday', etc
+//   lastUpdated: string | null // ISO string
+// }
 const users = new Map();
 
-// Helper: build Goo URL from Goo user id
-function buildGooUrl(gooUserId) {
-  return `https://11q.co/api/last/${gooUserId}`;
+// ========== Helpers ==========
+
+// Simple admin guard for protected routes
+function requireAdmin(req, res) {
+  if (!ADMIN_CODE) {
+    console.warn('WARNING: ADMIN_CODE is not set; admin protection is disabled!');
+    return true; // allow everything if not configured
+  }
+
+  const headerCode = req.headers['x-admin-code'];
+  const code = typeof headerCode === 'string' ? headerCode : null;
+
+  if (!code || code !== ADMIN_CODE) {
+    res.status(403).json({ error: 'Forbidden: invalid or missing admin code' });
+    return false;
+  }
+  return true;
 }
 
-// Helper: calculate days lived from yyyy-mm-dd
-function calculateDaysLived(formattedDate) {
-  if (!formattedDate) return null;
-  const birth = new Date(formattedDate + 'T00:00:00Z');
+// Build Goo URL from user.id (Goo ID)
+function buildGooURL(id) {
+  return `https://11q.co/api/last/${encodeURIComponent(id)}`;
+}
+
+// Calculate days lived from a YYYY-MM-DD date string
+function calculateDaysLived(dateStr) {
+  if (!dateStr) return null;
+  const birth = new Date(dateStr + 'T00:00:00Z');
   if (isNaN(birth.getTime())) return null;
 
   const now = new Date();
@@ -55,19 +79,29 @@ function calculateDaysLived(formattedDate) {
   return days;
 }
 
-// Helper: call OpenAI to extract date from query text (locale-aware)
+// Calculate weekday name from YYYY-MM-DD (using UTC)
+function calculateWeekday(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (isNaN(d.getTime())) return null;
+
+  const idx = d.getUTCDay(); // 0 = Sunday
+  const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return names[idx] || null;
+}
+
+// Call OpenAI to extract YYYY-MM-DD from query text, honoring locale
 async function extractDateWithOpenAI(user, queryText) {
-  const apiKey = user.openaiApiKey;
-  if (!apiKey) {
-    console.error(`No OpenAI API key configured for user ${user.userId}`);
+  const key = user.openaiKey;
+  if (!key) {
+    console.error(`User ${user.id}: missing OpenAI key`);
     return null;
   }
 
-  const locale = user.dateLocale === 'INTL' ? 'INTL' : 'US';
-
+  const locale = user.locale === 'INTL' ? 'INTL' : 'US';
   let localeInstructions;
+
   if (locale === 'US') {
-    // US: MM/DD/YYYY
     localeInstructions = `
 Interpret all ambiguous numeric dates using **U.S. format** (MM/DD/YYYY).
 Examples:
@@ -76,7 +110,6 @@ Examples:
 - 1/2/05 → 2005-01-02 (two-digit year also U.S. format)
 `;
   } else {
-    // International: DD/MM/YYYY
     localeInstructions = `
 Interpret all ambiguous numeric dates using **day-first international format** (DD/MM/YYYY).
 Examples:
@@ -104,7 +137,7 @@ Text: "${queryText}"
     const response = await fetchFn('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -119,7 +152,7 @@ Text: "${queryText}"
 
     if (!response.ok) {
       const text = await response.text();
-      console.error(`OpenAI error for user ${user.userId}:`, response.status, text);
+      console.error(`OpenAI error for user ${user.id}:`, response.status, text);
       return null;
     }
 
@@ -128,264 +161,199 @@ Text: "${queryText}"
     if (!content) return null;
 
     content = content.trim();
-
     if (content.toLowerCase() === 'null') {
       return null;
     }
 
-    // Strip code fences / backticks if present
+    // Strip code fences if present
     content = content.replace(/```[\s\S]*?```/g, ' ');
     content = content.replace(/`/g, ' ');
 
-    // Look for ANY yyyy-mm-dd pattern in the content
     const match = content.match(/\d{4}-\d{2}-\d{2}/);
     if (!match) {
-      console.warn(`OpenAI returned unexpected format for user ${user.userId}:`, content);
+      console.warn(`OpenAI returned unexpected format for user ${user.id}:`, content);
       return null;
     }
 
-    const formatted = match[0];
-    return formatted;
+    return match[0];
   } catch (err) {
-    console.error(`Error calling OpenAI for user ${user.userId}:`, err);
+    console.error(`Error calling OpenAI for user ${user.id}:`, err);
     return null;
   }
 }
 
-// Helper: perform one poll cycle for a user
+// Poll Goo for a single user
 async function pollUser(user) {
-  if (!user.gooUrl) {
-    console.error(`User ${user.userId} has no gooUrl configured.`);
-    return;
-  }
+  const gooURL = buildGooURL(user.id);
 
   try {
-    const res = await fetchFn(user.gooUrl);
+    const res = await fetchFn(gooURL);
     if (!res.ok) {
       const text = await res.text();
-      console.error(`Goo API error for user ${user.userId}:`, res.status, text);
+      console.error(`Goo error for user ${user.id}:`, res.status, text);
       return;
     }
 
     const data = await res.json();
     const newQuery = data.query;
+
     if (typeof newQuery !== 'string') {
-      console.warn(`Goo API for user ${user.userId} returned no "query" string:`, data);
+      console.warn(`User ${user.id}: Goo response did not contain a string "query"`, data);
       return;
     }
 
-    user.lastQuery = newQuery;
-
-    // Only process if the query actually changed
-    if (newQuery === user.lastProcessedQuery) {
+    // If query didn't change, no need to call OpenAI again
+    if (user.query === newQuery) {
       return;
     }
 
-    console.log(`User ${user.userId}: detected new query, sending to OpenAI (locale=${user.dateLocale || 'US'}).`);
+    user.query = newQuery;
+    console.log(`User ${user.id}: new query detected, sending to OpenAI.`);
 
-    const formatted = await extractDateWithOpenAI(user, newQuery);
-    if (!formatted) {
-      console.warn(`User ${user.userId}: could not extract formatted date from query.`);
+    const date = await extractDateWithOpenAI(user, newQuery);
+    if (!date) {
+      console.warn(`User ${user.id}: could not extract date for query.`);
       return;
     }
 
-    const days = calculateDaysLived(formatted);
+    const days = calculateDaysLived(date);
     if (days === null) {
-      console.warn(`User ${user.userId}: failed to calculate days lived from ${formatted}`);
+      console.warn(`User ${user.id}: failed to compute daysLived for date ${date}`);
       return;
     }
 
-    user.formattedDate = formatted;
+    const weekday = calculateWeekday(date);
+
+    user.date = date;
     user.daysLived = days;
-    user.lastProcessedQuery = newQuery;
+    user.weekday = weekday;
     user.lastUpdated = new Date().toISOString();
 
-    console.log(`User ${user.userId}: updated formattedDate=${formatted}, daysLived=${days}`);
+    console.log(`User ${user.id}: date=${date}, daysLived=${days}, weekday=${weekday}`);
   } catch (err) {
-    console.error(`Error polling Goo for user ${user.userId}:`, err);
+    console.error(`Error polling Goo for user ${user.id}:`, err);
   }
 }
 
-// Helper: start polling for a user (always, no manual toggle; 2s interval)
-function startPollingForUser(user) {
-  if (user.polling && user.timerId) {
-    return;
-  }
+// Start polling loop for a user (every 2 seconds)
+function startPolling(user) {
+  if (user.polling && user.timerId) return;
+
   const interval = user.pollIntervalMs || 2000;
+  user.pollIntervalMs = interval;
   user.polling = true;
   user.timerId = setInterval(() => {
     pollUser(user).catch(err => console.error('Poll error:', err));
   }, interval);
-  console.log(`Started polling for user ${user.userId} every ${interval}ms`);
+
+  console.log(`Started polling for user ${user.id} every ${interval}ms`);
 }
 
-// Helper: stop polling (kept for internal use if needed)
-function stopPollingForUser(user) {
+// Stop polling loop for a user
+function stopPolling(user) {
   if (user.timerId) {
     clearInterval(user.timerId);
     user.timerId = null;
   }
   user.polling = false;
-  console.log(`Stopped polling for user ${user.userId}`);
+  console.log(`Stopped polling for user ${user.id}`);
 }
 
-// Helper: sanitize user object for API responses (do not leak OpenAI key)
+// Public-facing view of a user for /users list
 function publicUser(user) {
   return {
-    userId: user.userId,
-    gooUserId: user.gooUserId,
-    gooUrl: user.gooUrl,
-    pollIntervalMs: user.pollIntervalMs,
-    polling: user.polling,
-    lastQuery: user.lastQuery,
-    lastProcessedQuery: user.lastProcessedQuery,
-    formattedDate: user.formattedDate,
+    id: user.id,
+    locale: user.locale,
+    query: user.query,
+    date: user.date,
     daysLived: user.daysLived,
-    lastUpdated: user.lastUpdated,
-    dateLocale: user.dateLocale || 'US'
+    weekday: user.weekday,
+    lastUpdated: user.lastUpdated
   };
 }
 
-// Routes
+// ========== Routes ==========
 
+// Health / info
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Double Date API is running. Visit /docs for admin UI.' });
+  res.json({
+    status: 'ok',
+    message: 'Double Date API is running. Admin: /admin, stats: /:id/stats'
+  });
 });
 
-// Admin docs page
-app.get('/docs', (req, res) => {
-  res.sendFile(path.join(__dirname, 'docs.html'));
+// ---------- Admin UI page ----------
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
-// Create a new user (auto-poll ON, 2s interval)
-app.post('/api/users', (req, res) => {
-  const { userId, gooUserId, openaiApiKey, dateLocale } = req.body || {};
+// ---------- Admin API ----------
 
-  if (!userId || typeof userId !== 'string') {
-    return res.status(400).json({ error: 'userId (string) is required' });
-  }
-  if (!openaiApiKey || typeof openaiApiKey !== 'string') {
-    return res.status(400).json({ error: 'openaiApiKey (string) is required' });
-  }
-  if (!gooUserId) {
-    return res.status(400).json({ error: 'gooUserId is required' });
-  }
-  if (users.has(userId)) {
-    return res.status(400).json({ error: 'User with this userId already exists' });
-  }
+// Create user: body { id, openaiKey }, admin-only
+app.post('/create', (req, res) => {
+  if (!requireAdmin(req, res)) return;
 
-  const finalGooUrl = buildGooUrl(gooUserId);
-  const interval = 2000; // 2 seconds
-  const locale = dateLocale === 'INTL' ? 'INTL' : 'US';
+  const { id, openaiKey } = req.body || {};
+
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({ error: 'id (string, Goo ID) is required' });
+  }
+  if (!openaiKey || typeof openaiKey !== 'string') {
+    return res.status(400).json({ error: 'openaiKey (string) is required' });
+  }
+  if (users.has(id)) {
+    return res.status(400).json({ error: 'User with this id already exists' });
+  }
 
   const user = {
-    userId,
-    gooUserId,
-    gooUrl: finalGooUrl,
-    openaiApiKey,
-    pollIntervalMs: interval,
+    id,
+    openaiKey,
+    locale: 'US', // default locale
+    pollIntervalMs: 2000,
     polling: false,
     timerId: null,
-    lastQuery: null,
-    lastProcessedQuery: null,
-    formattedDate: null,
+    query: null,
+    date: null,
     daysLived: null,
-    lastUpdated: null,
-    dateLocale: locale
+    weekday: null,
+    lastUpdated: null
   };
 
-  users.set(userId, user);
-  startPollingForUser(user);
+  users.set(id, user);
+  startPolling(user);
 
   res.status(201).json(publicUser(user));
 });
 
-// List all users
-app.get('/api/users', (req, res) => {
+// List users (admin)
+app.get('/users', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
   const list = Array.from(users.values()).map(publicUser);
   res.json(list);
 });
 
-// Get a single user (including daysLived)
-app.get('/api/users/:userId', (req, res) => {
-  const { userId } = req.params;
-  const user = users.get(userId);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  res.json(publicUser(user));
-});
+// Delete user (admin)
+app.delete('/:id/delete', (req, res) => {
+  if (!requireAdmin(req, res)) return;
 
-// Delete a user
-app.delete('/api/users/:userId', (req, res) => {
-  const { userId } = req.params;
-  const user = users.get(userId);
+  const { id } = req.params;
+  const user = users.get(id);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  stopPollingForUser(user);
-  users.delete(userId);
+  stopPolling(user);
+  users.delete(id);
   res.json({ ok: true });
 });
 
-// Ultra-safe Hydra endpoint: ALWAYS returns a STRING and NEVER errors
-app.get('/api/users/:userId/days-lived', (req, res) => {
-  try {
-    const { userId } = req.params;
-    const user = users.get(userId);
+// Force manual refresh for a user (admin)
+app.post('/:id/refresh', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
 
-    let numericValue = 0;
-
-    if (!user) {
-      console.warn(`Hydra requested days-lived for missing user ${userId}`);
-    } else if (typeof user.daysLived === 'number' && Number.isFinite(user.daysLived)) {
-      numericValue = user.daysLived;
-    }
-
-    const stringValue = String(numericValue);
-
-    res.set('Content-Type', 'application/json');
-    return res.status(200).send(JSON.stringify({ daysLived: stringValue }));
-  } catch (err) {
-    console.error('Hydra endpoint error:', err);
-    res.set('Content-Type', 'application/json');
-    return res.status(200).send(JSON.stringify({ daysLived: "0" }));
-  }
-});
-
-// Update user config (gooUserId, openaiApiKey, dateLocale)
-app.patch('/api/users/:userId', (req, res) => {
-  const { userId } = req.params;
-  const user = users.get(userId);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
-  const { gooUserId, openaiApiKey, dateLocale } = req.body || {};
-
-  if (gooUserId) {
-    user.gooUserId = gooUserId;
-    user.gooUrl = buildGooUrl(gooUserId);
-  }
-
-  if (openaiApiKey) {
-    user.openaiApiKey = openaiApiKey;
-  }
-
-  if (dateLocale === 'US' || dateLocale === 'INTL') {
-    user.dateLocale = dateLocale;
-  }
-
-  // Keep polling as-is (no toggles in UI)
-
-  res.json(publicUser(user));
-});
-
-// Manually trigger one poll cycle for a user
-app.post('/api/users/:userId/refresh', async (req, res) => {
-  const { userId } = req.params;
-  const user = users.get(userId);
+  const { id } = req.params;
+  const user = users.get(id);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -399,14 +367,94 @@ app.post('/api/users/:userId/refresh', async (req, res) => {
   }
 });
 
-// Global error handler – always JSON (never HTML)
+// Admin-only: update OpenAI key (and optionally locale) for a user
+app.patch('/:id/admin-update', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const { id } = req.params;
+  const user = users.get(id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const { openaiKey, locale } = req.body || {};
+
+  if (openaiKey && typeof openaiKey === 'string') {
+    user.openaiKey = openaiKey;
+  }
+  if (locale === 'US' || locale === 'INTL') {
+    user.locale = locale;
+  }
+
+  res.json(publicUser(user));
+});
+
+// ---------- User-facing API ----------
+
+// User-facing update: allow changing locale WITHOUT admin code
+// PATCH /:id/update { locale: "US" | "INTL" }
+app.patch('/:id/update', (req, res) => {
+  const { id } = req.params;
+  const user = users.get(id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const { locale } = req.body || {};
+  if (locale !== 'US' && locale !== 'INTL') {
+    return res.status(400).json({ error: 'locale must be "US" or "INTL"' });
+  }
+
+  user.locale = locale;
+  res.json({ id: user.id, locale: user.locale });
+});
+
+// Public stats endpoint: used by Hydra / Sensus / Show
+// GET /:id/stats -> { daysLived: "6500", weekday: "Thursday" }
+app.get('/:id/stats', (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = users.get(id);
+
+    let daysStr = '0';
+    let weekdayStr = '';
+
+    if (!user) {
+      console.warn(`Stats requested for missing user ${id}`);
+    } else {
+      if (typeof user.daysLived === 'number' && Number.isFinite(user.daysLived)) {
+        daysStr = String(user.daysLived);
+      }
+      if (typeof user.weekday === 'string') {
+        weekdayStr = user.weekday;
+      }
+    }
+
+    res.set('Content-Type', 'application/json');
+    return res.status(200).send(JSON.stringify({
+      daysLived: daysStr,
+      weekday: weekdayStr
+    }));
+  } catch (err) {
+    console.error('Stats endpoint error:', err);
+    res.set('Content-Type', 'application/json');
+    return res.status(200).send(JSON.stringify({
+      daysLived: '0',
+      weekday: ''
+    }));
+  }
+});
+
+// ---------- Global error handler ----------
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.set('Content-Type', 'application/json');
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ---------- Start server ----------
 app.listen(PORT, () => {
   console.log(`Double Date API listening on port ${PORT}`);
-  console.log(`Visit http://localhost:${PORT}/docs to manage users.`);
+  console.log(`Admin UI: http://localhost:${PORT}/admin`);
+  console.log(`Stats endpoint: http://localhost:${PORT}/<id>/stats`);
 });
