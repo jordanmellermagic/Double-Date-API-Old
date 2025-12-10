@@ -1,5 +1,5 @@
 // server.js
-// Double Date API - Final Clean Version
+// Double Date API - Final Clean Version (with date + prompt fixes)
 
 const express = require('express');
 const path = require('path');
@@ -7,8 +7,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// IMPORTANT: set this in your environment on Render or locally
-// e.g. ADMIN_CODE=yourSecret123
+// Set this in your environment (Render, local, etc)
 const ADMIN_CODE = process.env.ADMIN_CODE || null;
 
 app.use(express.json());
@@ -27,25 +26,23 @@ if (typeof global.fetch === 'function') {
 //
 // Shape:
 // {
-//   id: string,          // same as Goo ID, and URL segment
-//   openaiKey: string,   // OpenAI API key for this user
+//   id: string,
+//   openaiKey: string,
 //   locale: 'US' | 'INTL',
-//
 //   pollIntervalMs: number,
 //   polling: boolean,
 //   timerId: NodeJS.Timeout | null,
-//
-//   query: string | null,      // last processed Goo query
+//   query: string | null,
 //   date: string | null,       // 'YYYY-MM-DD'
-//   daysLived: number | null,  // number of days since date
+//   daysLived: number | null,  // integer
 //   weekday: string | null,    // 'Monday', etc
-//   lastUpdated: string | null // ISO string
+//   lastUpdated: string | null // ISO timestamp
 // }
 const users = new Map();
 
 // ========== Helpers ==========
 
-// Simple admin guard for protected routes
+// Admin guard for protected routes
 function requireAdmin(req, res) {
   if (!ADMIN_CODE) {
     console.warn('WARNING: ADMIN_CODE is not set; admin protection is disabled!');
@@ -62,14 +59,16 @@ function requireAdmin(req, res) {
   return true;
 }
 
-// Build Goo URL from user.id (Goo ID)
+// Build Goo URL from Goo ID (id)
 function buildGooURL(id) {
   return `https://11q.co/api/last/${encodeURIComponent(id)}`;
 }
 
-// Calculate days lived from a YYYY-MM-DD date string
+// Calculate days lived from a YYYY-MM-DD date string (LOCAL time, not UTC)
 function calculateDaysLived(dateStr) {
   if (!dateStr) return null;
+
+  // Interpret as local midnight for that date
   const birth = new Date(dateStr);
   if (isNaN(birth.getTime())) return null;
 
@@ -79,13 +78,14 @@ function calculateDaysLived(dateStr) {
   return days;
 }
 
-// Calculate weekday name from YYYY-MM-DD (using UTC)
+// Calculate weekday name from YYYY-MM-DD (LOCAL midnight)
 function calculateWeekday(dateStr) {
   if (!dateStr) return null;
-  const d = new Date(dateStr + 'T00:00:00Z');
+
+  const d = new Date(dateStr);
   if (isNaN(d.getTime())) return null;
 
-  const idx = d.getUTCDay(); // 0 = Sunday
+  const idx = d.getDay(); // 0 = Sunday (local)
   const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   return names[idx] || null;
 }
@@ -102,27 +102,53 @@ async function extractDateWithOpenAI(user, queryText) {
   let localeInstructions;
 
   if (locale === 'US') {
+    // Strict U.S. MM/DD/YYYY interpretation
     localeInstructions = `
-Interpret all ambiguous numeric dates using **U.S. format** (MM/DD/YYYY).
-Examples:
-- 11/3/2008 → 2008-11-03
-- 4/12/1999 → 1999-04-12
-- 1/2/05 → 2005-01-02 (two-digit year also U.S. format)
-`;
+Interpret ALL numeric dates using strictly U.S. format (MM/DD/YYYY).
+
+Rules:
+1. The first number is always the MONTH.
+2. The second number is always the DAY.
+3. The third number is always the YEAR.
+4. Do NOT reinterpret numbers as offsets, "days before", or ordinal values.
+5. Never convert "09/1/1977" into August 31. It MUST be September 1, 1977.
+6. If the year is two digits, assume 19xx if ≥ 30, otherwise 20xx.
+
+Examples (US):
+- "09/1/1977" → 1977-09-01
+- "11/3/2008" → 2008-11-03
+- "4/12/99" → 1999-04-12
+- "1/2/05" → 2005-01-02
+
+If the text contains a date with slashes, NEVER reinterpret or reorder the numbers beyond these rules.
+`.trim();
   } else {
+    // Strict international DD/MM/YYYY interpretation
     localeInstructions = `
-Interpret all ambiguous numeric dates using **day-first international format** (DD/MM/YYYY).
-Examples:
-- 11/3/2008 → 2008-03-11
-- 4/12/1999 → 1999-12-04
-- 1/2/05 → 2005-02-01 (two-digit year also DD/MM/YY style)
-`;
+Interpret ALL numeric dates using strictly international day-first format (DD/MM/YYYY).
+
+Rules:
+1. The first number is always the DAY.
+2. The second number is always the MONTH.
+3. The third number is always the YEAR.
+4. Do NOT reinterpret numbers as offsets, "days before", or ordinal values.
+5. Never convert "09/1/1977" into August 31. It MUST be 09 January 1977.
+6. If the year is two digits, assume 19xx if ≥ 30, otherwise 20xx.
+
+Examples (INTL):
+- "09/1/1977" → 1977-01-09
+- "11/3/2008" → 2008-03-11
+- "4/12/99" → 1999-12-04
+- "1/2/05" → 2005-02-01
+
+If the text contains a date with slashes, NEVER reinterpret or reorder the numbers beyond these rules.
+`.trim();
   }
 
   const prompt = `
 Extract the date from the following text.
 
-${localeInstructions.trim()}
+${localeInstructions}
 
 Additional rules:
 1. Do NOT change clearly written dates with month names (e.g. "March 6 2008" stays 2008-03-06).
@@ -165,7 +191,7 @@ Text: "${queryText}"
       return null;
     }
 
-    // Strip code fences if present
+    // Strip code fences/backticks if present
     content = content.replace(/```[\s\S]*?```/g, ' ');
     content = content.replace(/`/g, ' ');
 
@@ -259,7 +285,7 @@ function stopPolling(user) {
   console.log(`Stopped polling for user ${user.id}`);
 }
 
-// Public-facing view of a user for /users list
+// Public-facing view for /users list
 function publicUser(user) {
   return {
     id: user.id,
@@ -282,7 +308,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// ---------- Admin UI page ----------
+// Admin UI HTML
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
