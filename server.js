@@ -82,7 +82,7 @@ function calculateDaysLived(dateStr) {
 function calculateWeekday(dateStr) {
   if (!dateStr) return null;
 
-  const d = new Date(dateStr);
+  const d = new Date(dateStr + "T12:00:00");
   if (isNaN(d.getTime())) return null;
 
   const idx = d.getDay(); // 0 = Sunday (local)
