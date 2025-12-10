@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Double Date Admin</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 1.5rem;
+      background: #050816;
+      color: #f9fafb;
+    }
+    h1, h2 {
+      margin-bottom: 0.5rem;
+    }
+    h1 { font-size: 1.9rem; }
+    h2 { font-size: 1.3rem; margin-top: 0.5rem; }
+
+    .card {
+      background: #0b1120;
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 0 0 1px rgba(148,163,184,0.25);
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+      color: #cbd5f5;
+    }
+    input {
+      width: 100%;
+      padding: 0.35rem 0.5rem;
+      border-radius: 6px;
+      border: 1px solid #1f2937;
+      margin-top: 0.2rem;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 0.9rem;
+    }
+    input::placeholder {
+      color: #6b7280;
+    }
+    button {
+      margin-top: 0.75rem;
+      padding: 0.4rem 0.8rem;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.9rem;
+      background: #6366f1;
+      color: white;
+    }
+    button.secondary {
+      background: #111827;
+      color: #e5e7eb;
+      margin-left: 0.25rem;
+    }
+    button.danger {
+      background: #dc2626;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .col {
+      flex: 1 1 300px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+    }
+    th, td {
+      padding: 0.4rem 0.5rem;
+      border-bottom: 1px solid #1f2937;
+      vertical-align: middle;
+    }
+    th {
+      text-align: left;
+      color: #9ca3af;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    code {
+      font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.8rem;
+      background: #020617;
+      padding: 0.15rem 0.3rem;
+      border-radius: 4px;
+    }
+    #status, #login-status {
+      font-size: 0.8rem;
+      color: #a5b4fc;
+      margin-top: 0.25rem;
+      min-height: 1rem;
+    }
+    .hidden {
+      display: none;
+    }
+    .small-note {
+      font-size: 0.75rem;
+      color: #9ca3af;
+      margin-top: 0.25rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Double Date Admin</h1>
+  <p style="font-size:0.9rem;color:#e5e7eb;margin-bottom:1rem;">
+    Manage users for Double Date. This panel is protected by an admin code.
+  </p>
+
+  <!-- Login Card -->
+  <div id="login-card" class="card">
+    <h2>Admin Login</h2>
+    <label>
+      Admin Code
+      <input id="admin-code-input" type="password" placeholder="Enter your admin code" />
+    </label>
+    <button id="login-btn">Enter</button>
+    <div id="login-status"></div>
+    <p class="small-note">
+      The admin code is checked on every admin action via the <code>x-admin-code</code> header.
+    </p>
+  </div>
+
+  <!-- Main Admin Panel -->
+  <div id="admin-panel" class="hidden">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h2>Create User</h2>
+          <p style="font-size:0.8rem;color:#9ca3af;margin-bottom:0.4rem;">
+            Each user is identified by their Goo ID. Locale defaults to <code>US</code> and can be changed later via the front-end app.
+          </p>
+
+          <label>
+            Goo ID (User ID)
+            <input id="create-id" placeholder="e.g. 158" />
+          </label>
+          <label>
+            OpenAI Key
+            <input id="create-openai" type="password" placeholder="sk-..." />
+          </label>
+          <button id="create-user-btn">Create User</button>
+          <div id="status"></div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card">
+          <h2>Users</h2>
+          <div id="users-container">
+            <p style="font-size:0.85rem;color:#9ca3af;">No users yet.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const loginCard = document.getElementById('login-card');
+    const adminPanel = document.getElementById('admin-panel');
+    const loginStatus = document.getElementById('login-status');
+    const statusEl = document.getElementById('status');
+
+    function getAdminCode() {
+      return localStorage.getItem('doubleDateAdminCode') || '';
+    }
+
+    function setAdminCode(code) {
+      if (code) {
+        localStorage.setItem('doubleDateAdminCode', code);
+      } else {
+        localStorage.removeItem('doubleDateAdminCode');
+      }
+    }
+
+    async function fetchJSON(url, options = {}) {
+      const adminCode = getAdminCode();
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      };
+      if (adminCode) {
+        headers['x-admin-code'] = adminCode;
+      }
+
+      const res = await fetch(url, {
+        ...options,
+        headers
+      });
+
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+
+      if (!res.ok) {
+        const msg = data && data.error ? data.error : 'Request failed';
+        throw new Error(msg);
+      }
+
+      return data;
+    }
+
+    async function loadUsers() {
+      const container = document.getElementById('users-container');
+      try {
+        const users = await fetchJSON('/users');
+        if (!users.length) {
+          container.innerHTML = '<p style="font-size:0.85rem;color:#9ca3af;">No users yet.</p>';
+          return;
+        }
+
+        let html = '<table><thead><tr><th>ID (Goo)</th><th>Locale</th><th>Days</th><th>Weekday</th><th>Last Updated</th><th>Actions</th></tr></thead><tbody>';
+        for (const u of users) {
+          html += `
+            <tr>
+              <td><code>${u.id}</code></td>
+              <td>${u.locale || 'US'}</td>
+              <td>${u.daysLived ?? '—'}</td>
+              <td>${u.weekday || '—'}</td>
+              <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${u.lastUpdated || ''}">
+                ${u.lastUpdated ? u.lastUpdated : '<span style="color:#6b7280;">(never)</span>'}
+              </td>
+              <td>
+                <button class="secondary" onclick="refreshUser('${u.id}')">Refresh</button>
+                <button class="secondary" onclick="updateKey('${u.id}')">Update Key</button>
+                <button class="secondary danger" onclick="deleteUser('${u.id}')">Delete</button>
+              </td>
+            </tr>
+          `;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<p style="color:#f97373;font-size:0.85rem;">Error loading users: ${err.message}</p>`;
+      }
+    }
+
+    async function refreshUser(id) {
+      try {
+        await fetchJSON(`/${encodeURIComponent(id)}/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        await loadUsers();
+      } catch (err) {
+        alert('Error refreshing user: ' + err.message);
+      }
+    }
+
+    async function deleteUser(id) {
+      if (!confirm(`Delete user ${id}? This will stop polling and remove them.`)) return;
+      try {
+        await fetchJSON(`/${encodeURIComponent(id)}/delete`, {
+          method: 'DELETE'
+        });
+        await loadUsers();
+      } catch (err) {
+        alert('Error deleting user: ' + err.message);
+      }
+    }
+
+    async function updateKey(id) {
+      const key = prompt(`Enter new OpenAI key for user ${id} (leave blank to cancel):`);
+      if (!key) return;
+      try {
+        await fetchJSON(`/${encodeURIComponent(id)}/admin-update`, {
+          method: 'PATCH',
+          body: JSON.stringify({ openaiKey: key })
+        });
+        await loadUsers();
+      } catch (err) {
+        alert('Error updating key: ' + err.message);
+      }
+    }
+
+    document.getElementById('create-user-btn').addEventListener('click', async () => {
+      const id = document.getElementById('create-id').value.trim();
+      const openaiKey = document.getElementById('create-openai').value.trim();
+
+      statusEl.textContent = '';
+
+      if (!id) {
+        statusEl.textContent = 'Goo ID (id) is required.';
+        return;
+      }
+      if (!openaiKey) {
+        statusEl.textContent = 'OpenAI key is required.';
+        return;
+      }
+
+      try {
+        await fetchJSON('/create', {
+          method: 'POST',
+          body: JSON.stringify({ id, openaiKey })
+        });
+        statusEl.textContent = 'User created and polling started.';
+        document.getElementById('create-id').value = '';
+        document.getElementById('create-openai').value = '';
+        await loadUsers();
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    });
+
+    document.getElementById('login-btn').addEventListener('click', async () => {
+      const code = document.getElementById('admin-code-input').value.trim();
+      loginStatus.textContent = '';
+
+      if (!code) {
+        loginStatus.textContent = 'Admin code is required.';
+        return;
+      }
+
+      setAdminCode(code);
+
+      try {
+        await loadUsers();
+        loginCard.classList.add('hidden');
+        adminPanel.classList.remove('hidden');
+      } catch (err) {
+        setAdminCode('');
+        loginStatus.textContent = 'Invalid admin code or error: ' + err.message;
+      }
+    });
+
+    // Auto-try existing admin code on page load
+    (async function init() {
+      const existing = getAdminCode();
+      if (!existing) return;
+      try {
+        await loadUsers();
+        loginCard.classList.add('hidden');
+        adminPanel.classList.remove('hidden');
+      } catch {
+        setAdminCode('');
+      }
+    })();
+
+    // Refresh users periodically while admin panel is visible
+    setInterval(() => {
+      if (!adminPanel.classList.contains('hidden')) {
+        loadUsers();
+      }
+    }, 5000);
+  </script>
+</body>
+</html>
