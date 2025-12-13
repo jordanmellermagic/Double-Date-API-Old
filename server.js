@@ -71,7 +71,7 @@ function calculateDaysLived(dateStr) {
   const now = nowInLA();
 
   const diffMs = now.getTime() - birth.getTime();
-  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24)) - 1;
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
   return days;
 }
