@@ -1,246 +1,350 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-import requests
-import os
-import time
-from zoneinfo import ZoneInfo
-import secrets
+// server.js
+// Double Date API – LA Timezone Version
 
-app = FastAPI()
+const express = require('express');
+const path = require('path');
 
-# ======================
-# Constants
-# ======================
-MS_PER_DAY = 1000 * 60 * 60 * 24
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-ADMIN_LICENSE_CODE = os.getenv("ADMIN_LICENSE_CODE")
-if not ADMIN_LICENSE_CODE:
-    raise RuntimeError("ADMIN_LICENSE_CODE env var is required")
+// Set this in your environment (Render, local, etc)
+const ADMIN_CODE = process.env.ADMIN_CODE || null;
 
-# ======================
-# In-memory storage
-# ======================
-users = {}
+app.use(express.json());
 
-# ======================
-# Middleware
-# ======================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+// Use global fetch if available (Node 18+), otherwise fall back to node-fetch
+let fetchFn;
+if (typeof global.fetch === 'function') {
+  fetchFn = global.fetch.bind(global);
+} else {
+  fetchFn = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+}
 
-# ======================
-# Auth helpers
-# ======================
-def require_admin(request: Request):
-    code = request.headers.get("x-admin-license")
-    if code != ADMIN_LICENSE_CODE:
-        raise HTTPException(status_code=403, detail="Invalid admin license")
+// =========================================
+// FORCE LOS ANGELES TIMEZONE FOR DATE MATH
+// =========================================
+function nowInLA() {
+  // Convert LA time string → JS Date object
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" })
+  );
+}
 
-def get_user_by_license(request: Request):
-    license_code = request.headers.get("x-user-license")
-    if not license_code:
-        raise HTTPException(status_code=401, detail="Missing user license")
+function birthInLA(dateStr) {
+  // Birth date at LA local midnight
+  return new Date(`${dateStr}T00:00:00-08:00`);
+}
 
-    for user in users.values():
-        if user["user_license"] == license_code:
-            return user
+// ========== In-memory user store ==========
+const users = new Map();
 
-    raise HTTPException(status_code=403, detail="Invalid user license")
+// ========== Helpers ==========
 
-# ======================
-# Goo
-# ======================
-def build_goo_url(goo_user_id: str) -> str:
-    return f"https://11q.co/api/last/{goo_user_id}"
+// Admin guard for protected routes
+function requireAdmin(req, res) {
+  if (!ADMIN_CODE) {
+    console.warn('WARNING: ADMIN_CODE is not set; admin protection is disabled!');
+    return true;
+  }
+  const headerCode = req.headers['x-admin-code'];
+  const code = typeof headerCode === 'string' ? headerCode : null;
+  if (!code || code !== ADMIN_CODE) {
+    res.status(403).json({ error: 'Forbidden: invalid or missing admin code' });
+    return false;
+  }
+  return true;
+}
 
-# ======================
-# Manual date helpers
-# ======================
-def is_leap(year: int) -> bool:
-    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+function buildGooURL(id) {
+  return `https://11q.co/api/last/${encodeURIComponent(id)}`;
+}
 
-def days_in_month(year: int, month: int) -> int:
-    table = [31, 28 + is_leap(year), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    return table[month - 1]
+// =========================================
+// DAYS LIVED — USING LOS ANGELES TIMEZONE
+// =========================================
+function calculateDaysLived(dateStr) {
+  if (!dateStr) return null;
 
-def days_since_epoch(year: int, month: int, day: int) -> int:
-    days = 0
-    for y in range(1970, year):
-        days += 366 if is_leap(y) else 365
-    for m in range(1, month):
-        days += days_in_month(year, m)
-    days += day - 1
-    return days
+  const birth = birthInLA(dateStr);
+  if (isNaN(birth)) return null;
 
-def now_ms_in_timezone(tz_name: str) -> int:
-    tz = ZoneInfo(tz_name)
-    return int((time.time() + tz.utcoffset(None).total_seconds()) * 1000)
+  const now = nowInLA();
 
-def birth_midnight_ms(year: int, month: int, day: int, tz_name: str) -> int:
-    tz = ZoneInfo(tz_name)
-    days = days_since_epoch(year, month, day)
-    epoch_midnight_ms = days * MS_PER_DAY
-    offset_ms = int(tz.utcoffset(None).total_seconds() * 1000)
-    return epoch_midnight_ms - offset_ms
+  const diffMs = now.getTime() - birth.getTime();
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24)) - 1;
 
-def calculate_days_lived(year: int, month: int, day: int, tz_name: str) -> int:
-    now_ms = now_ms_in_timezone(tz_name)
-    birth_ms = birth_midnight_ms(year, month, day, tz_name)
-    return (now_ms - birth_ms) // MS_PER_DAY
+  return days;
+}
 
-def calculate_weekday(year: int, month: int, day: int) -> str:
-    names = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"]
-    return names[days_since_epoch(year, month, day) % 7]
+// =========================================
+// WEEKDAY — USING LOS ANGELES TIMEZONE
+// =========================================
+function calculateWeekday(dateStr) {
+  if (!dateStr) return null;
 
-# ======================
-# OpenAI
-# ======================
-def extract_date(openai_key: str, sentence: str, locale: str):
-    rules = "MM/DD/YYYY" if locale == "US" else "DD/MM/YYYY"
+  const d = birthInLA(dateStr);
+  if (isNaN(d)) return null;
 
-    prompt = f"""
+  const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return names[d.getDay()];
+}
+
+// ========== OpenAI Date Extraction ==========
+async function extractDateWithOpenAI(user, queryText) {
+  const key = user.openaiKey;
+  if (!key) {
+    console.error(`User ${user.id}: missing OpenAI key`);
+    return null;
+  }
+
+  const locale = user.locale === 'INTL' ? 'INTL' : 'US';
+  let localeInstructions;
+
+  if (locale === 'US') {
+    localeInstructions = `
+Interpret ALL numeric dates using strictly U.S. format (MM/DD/YYYY).
+
+Rules:
+1. The first number is always the MONTH.
+2. The second number is always the DAY.
+3. The third number is always the YEAR.
+4. NEVER reinterpret or reorder the numbers.
+`.trim();
+  } else {
+    localeInstructions = `
+Interpret ALL numeric dates using strictly international DD/MM/YYYY.
+
+Rules:
+1. First number = DAY.
+2. Second number = MONTH.
+3. Third number = YEAR.
+4. NEVER reinterpret or reorder the numbers.
+`.trim();
+  }
+
+  const prompt = `
 Extract the date from the text.
-Interpret numeric dates as {rules}.
-Output ONLY YYYY-MM-DD or null.
 
-Text: "{sentence}"
-""".strip()
+${localeInstructions}
 
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {openai_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "gpt-4o-mini",
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": "You are a strict date extractor."},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=15,
-    )
+- Output ONLY YYYY-MM-DD
+- Or output: null
+- No explanations.
 
-    if not r.ok:
-        return None
+Text: "${queryText}"
+`.trim();
 
-    content = r.json()["choices"][0]["message"]["content"].strip()
-    if content.lower() == "null":
-        return None
+  try {
+    const response = await fetchFn("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        messages: [
+          { role: "system", content: "You are a strict date-extraction tool." },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
 
-    return content if len(content) == 10 else None
-
-# ======================
-# Routes
-# ======================
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-@app.get("/admin", response_class=HTMLResponse)
-def admin_page():
-    try:
-        with open("admin.html", "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return "<h1>Admin UI</h1>"
-
-# ---------- Admin ----------
-@app.post("/admin/users")
-async def admin_create_user(request: Request):
-    require_admin(request)
-    data = await request.json()
-
-    user_license = secrets.token_urlsafe(24)
-
-    user = {
-        "user_id": data["user_id"],
-        "user_license": user_license,
-        "goo_user_id": data["goo_user_id"],
-        "openai_key": data["openai_key"],
-        "timezone": data["timezone"],
-        "locale": data.get("locale", "US"),
-        "last_query": None,
-        "last_result": None,
+    if (!response.ok) {
+      const text = await response.text();
+      console.error("OpenAI error:", text);
+      return null;
     }
 
-    users[user["user_id"]] = user
-    return {"user_id": user["user_id"], "user_license": user_license}
+    const data = await response.json();
+    let content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) return null;
 
-@app.get("/admin/users")
-def admin_list_users(request: Request):
-    require_admin(request)
-    return users
+    if (content.toLowerCase() === "null") return null;
 
-@app.delete("/admin/users/{user_id}")
-def admin_delete_user(user_id: str, request: Request):
-    require_admin(request)
-    users.pop(user_id, None)
-    return {"ok": True}
+    const match = content.match(/\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : null;
+  } catch (err) {
+    console.error("OpenAI Error:", err);
+    return null;
+  }
+}
 
-# ---------- Processing ----------
-@app.post("/process")
-def process_user(request: Request):
-    user = get_user_by_license(request)
+// ========== Poll Goo ==========
+async function pollUser(user) {
+  const gooURL = buildGooURL(user.id);
 
-    goo = requests.get(build_goo_url(user["goo_user_id"]), timeout=10)
-    if not goo.ok:
-        return {"updated": False}
-
-    sentence = goo.json().get("query")
-    if not sentence or sentence == user["last_query"]:
-        return {"updated": False}
-
-    date = extract_date(user["openai_key"], sentence, user["locale"])
-    if not date:
-        return {"updated": False}
-
-    y, m, d = map(int, date.split("-"))
-
-    days = calculate_days_lived(y, m, d, user["timezone"])
-    weekday = calculate_weekday(y, m, d)
-
-    user["last_query"] = sentence
-    user["last_result"] = {
-        "normalized_date": date,
-        "daysLived": days,
-        "weekday": weekday,
+  try {
+    const res = await fetchFn(gooURL);
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Goo error:", res.status, text);
+      return;
     }
 
-    return {"updated": True}
+    const data = await res.json();
+    const newQuery = data.query;
 
-# ---------- Hydra ----------
-@app.get("/stats")
-def stats(request: Request):
-    user = get_user_by_license(request)
-    if not user["last_result"]:
-        return {"daysLived": None, "weekday": None}
-    return user["last_result"]
+    if (typeof newQuery !== "string") return;
 
-# ---------- App ----------
-@app.get("/user/me")
-def get_user(request: Request):
-    user = get_user_by_license(request)
-    return {
-        "goo_user_id": user["goo_user_id"],
-        "timezone": user["timezone"],
-        "locale": user["locale"],
-    }
+    if (user.query === newQuery) return;
 
-@app.patch("/user/me")
-async def update_user(request: Request):
-    user = get_user_by_license(request)
-    data = await request.json()
+    user.query = newQuery;
 
-    for key in ["goo_user_id", "timezone", "locale", "openai_key"]:
-        if key in data:
-            user[key] = data[key]
+    const date = await extractDateWithOpenAI(user, newQuery);
+    if (!date) return;
 
-    return {"ok": True}
+    user.date = date;
+    user.daysLived = calculateDaysLived(date);
+    user.weekday = calculateWeekday(date);
+    user.lastUpdated = nowInLA().toISOString();
+  } catch (err) {
+    console.error("Poll error:", err);
+  }
+}
+
+function startPolling(user) {
+  if (user.polling && user.timerId) return;
+
+  const interval = user.pollIntervalMs || 2000;
+  user.pollIntervalMs = interval;
+  user.polling = true;
+
+  user.timerId = setInterval(() => {
+    pollUser(user).catch(console.error);
+  }, interval);
+}
+
+function stopPolling(user) {
+  if (user.timerId) clearInterval(user.timerId);
+  user.timerId = null;
+  user.polling = false;
+}
+
+// ========== Public user view ==========
+function publicUser(user) {
+  return {
+    id: user.id,
+    locale: user.locale,
+    query: user.query,
+    date: user.date,
+    daysLived: user.daysLived,
+    weekday: user.weekday,
+    lastUpdated: user.lastUpdated
+  };
+}
+
+// ========== Routes ==========
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'Double Date API with LA timezone' });
+});
+
+// Admin page
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// ----- Admin API -----
+app.post('/create', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const { id, openaiKey } = req.body;
+  if (!id || !openaiKey) return res.status(400).json({ error: 'id + openaiKey required' });
+
+  if (users.has(id)) return res.status(400).json({ error: 'Exists' });
+
+  const user = {
+    id,
+    openaiKey,
+    locale: 'US',
+    pollIntervalMs: 2000,
+    polling: false,
+    timerId: null,
+    query: null,
+    date: null,
+    daysLived: null,
+    weekday: null,
+    lastUpdated: null
+  };
+
+  users.set(id, user);
+  startPolling(user);
+
+  res.json(publicUser(user));
+});
+
+app.get('/users', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(Array.from(users.values()).map(publicUser));
+});
+
+app.delete('/:id/delete', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const user = users.get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Not found' });
+  stopPolling(user);
+  users.delete(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/:id/refresh', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const user = users.get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Not found' });
+
+  await pollUser(user);
+  res.json(publicUser(user));
+});
+
+app.patch('/:id/admin-update', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const user = users.get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Not found' });
+
+  const { openaiKey, locale } = req.body;
+
+  if (openaiKey) user.openaiKey = openaiKey;
+  if (locale === 'US' || locale === 'INTL') user.locale = locale;
+
+  res.json(publicUser(user));
+});
+
+// ----- User-facing API -----
+app.patch('/:id/update', (req, res) => {
+  const { locale } = req.body;
+  const user = users.get(req.params.id);
+
+  if (!user) return res.status(404).json({ error: 'Not found' });
+  if (locale !== 'US' && locale !== 'INTL')
+    return res.status(400).json({ error: 'Invalid locale' });
+
+  user.locale = locale;
+  res.json({ id: user.id, locale });
+});
+
+// Stats
+app.get('/:id/stats', (req, res) => {
+  const user = users.get(req.params.id);
+
+  const result = {
+    daysLived: user?.daysLived != null ? String(user.daysLived) : "0",
+    weekday: user?.weekday || ""
+  };
+
+  res.json(result);
+});
+
+// ----- Error handler -----
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ----- Start server -----
+app.listen(PORT, () => {
+  console.log(`Double Date API listening on port ${PORT}`);
+});
